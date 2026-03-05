@@ -27,6 +27,12 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ── Configuración de sesiones ────────────────────────────────
+// ── Sesiones activas (controlar desde Railway → Variables) ───
+// Variable: SESIONES_ACTIVAS = avisos,campanas  (separadas por coma)
+// Por defecto solo arranca 'avisos'
+const SESIONES_ACTIVAS = (process.env.SESIONES_ACTIVAS || 'avisos')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 const SESIONES_CONFIG = {
   avisos:    { nombre: 'Avisos & Recordatorios', color: '#00d4ff', autoReply: false },
   campanas:  { nombre: 'Campañas & Marketing',   color: '#ff6b35', autoReply: false },
@@ -43,8 +49,10 @@ const SESIONES_CONFIG = {
 
 // ── Estado global por sesión ─────────────────────────────────
 const sesiones = {};
-for (const id of Object.keys(SESIONES_CONFIG)) {
-  sesiones[id] = { sock: null, listo: false, qr: null, numero: null, reconectando: false };
+for (const id of SESIONES_ACTIVAS) {
+  if (SESIONES_CONFIG[id]) {
+    sesiones[id] = { sock: null, listo: false, qr: null, numero: null, reconectando: false };
+  }
 }
 
 // ── Crear/conectar una sesión ────────────────────────────────
@@ -174,8 +182,13 @@ app.get('/', (req, res) => {
 
   for (const [id, cfg] of Object.entries(SESIONES_CONFIG)) {
     const s = sesiones[id];
+    const activa = SESIONES_ACTIVAS.includes(id);
     let statusBadge, extra = '';
-    if (s.listo) {
+
+    if (!activa) {
+      statusBadge = `<span class="badge" style="background:rgba(100,100,100,.2);color:#888">⏸ Desactivada</span>`;
+      extra = `<div class="numero" style="font-size:.65rem;color:#555">Agregar "${id}" a SESIONES_ACTIVAS</div>`;
+    } else if (s.listo) {
       statusBadge = `<span class="badge badge-on">✅ Conectado</span>`;
       extra = `<div class="numero">+${s.numero || '—'}</div>`;
     } else if (s.qr) {
@@ -191,7 +204,7 @@ app.get('/', (req, res) => {
       <h2>${cfg.nombre}</h2>
       <div class="status">${statusBadge}</div>
       ${extra}
-      <a class="btn" href="/sesion/${id}/desconectar?api_key=${API_KEY}">🔄 Reconectar</a>
+      ${activa ? `<a class="btn" href="/sesion/${id}/desconectar?api_key=${API_KEY}">🔄 Reconectar</a>` : ''}
     </div>`;
   }
 
@@ -206,12 +219,15 @@ app.get('/', (req, res) => {
 // Estado de todas las sesiones
 app.get('/sos/status', (req, res) => {
   const estado = {};
-  for (const [id, s] of Object.entries(sesiones)) {
+  for (const [id, cfg] of Object.entries(SESIONES_CONFIG)) {
+    const s = sesiones[id];
+    const activa = SESIONES_ACTIVAS.includes(id);
     estado[id] = {
-      nombre: SESIONES_CONFIG[id].nombre,
-      listo:  s.listo,
-      numero: s.numero,
-      tieneQR: !!s.qr,
+      nombre: cfg.nombre,
+      activa,
+      listo:  activa ? (s?.listo || false) : false,
+      numero: activa ? (s?.numero || null) : null,
+      tieneQR: activa ? (!!s?.qr) : false,
     };
   }
   res.json({ ok: true, sesiones: estado });
@@ -446,16 +462,18 @@ app.post('/grupos/enviar', auth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`[SERVER] 🚀 Puerto ${PORT}`);
-  console.log(`[SERVER] Sesiones configuradas: ${Object.keys(SESIONES_CONFIG).join(', ')}`);
+  console.log(`[SERVER] Sesiones activas: ${SESIONES_ACTIVAS.join(', ')}`);
 });
 
-// Iniciar sesiones con delay entre cada una para no saturar
+// Iniciar solo sesiones activas con delay entre cada una
 (async () => {
-  const ids = Object.keys(SESIONES_CONFIG);
+  const ids = SESIONES_ACTIVAS.filter(id => SESIONES_CONFIG[id]);
+  console.log(`[BOOT] Sesiones activas: ${ids.join(', ')}`);
+  console.log(`[BOOT] (Para cambiar: Railway → Variables → SESIONES_ACTIVAS)`);
   for (let i = 0; i < ids.length; i++) {
     console.log(`[BOOT] Iniciando sesión: ${ids[i]}...`);
     await conectarSesion(ids[i]).catch(e => console.error(`[BOOT] Error ${ids[i]}:`, e.message));
     if (i < ids.length - 1) await new Promise(r => setTimeout(r, 3000));
   }
-  console.log('[BOOT] ✅ Todas las sesiones iniciadas');
+  console.log('[BOOT] ✅ Sesiones iniciadas');
 })();
