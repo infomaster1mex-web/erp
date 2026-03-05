@@ -1,16 +1,16 @@
-# nixpacks.toml — Railway necesita Chromium para que funcione puppeteer
+# nixpacks.toml — Instala Chromium para puppeteer en Railway
 [phases.setup]
 nixPkgs = [
   "chromium",
   "nss",
   "freetype",
-  "freetype-dev",
   "harfbuzz",
   "ca-certificates",
-  "ttf-freefont",
-  "font-noto-emoji"
+  "ttf-freefont"
 ]
 
-[variables]
-PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
-PUPPETEER_EXECUTABLE_PATH = "/run/current-system/sw/bin/chromium"
+[phases.build]
+cmds = ["npm install"]
+
+[start]
+cmd = "PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true PUPPETEER_EXECUTABLE_PATH=$(which chromium) node index.js"
