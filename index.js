@@ -5,7 +5,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-} from '@whiskeysockets/baileys';;
+} from '@whiskeysockets/baileys';
 
 import express from 'express';
 import qrcode from 'qrcode';
@@ -76,7 +76,6 @@ async function conectar() {
         setTimeout(conectar, 5000);
       } else {
         console.log('[WA] Sesión cerrada — borra auth_info y reinicia para nuevo QR');
-        // Borrar sesión corrupta para forzar nuevo QR
         try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
         setTimeout(conectar, 3000);
       }
@@ -162,7 +161,7 @@ app.post('/sos/enviar-masivo', auth, async (req, res) => {
     try {
       await sock.sendMessage(toJid(tel), { text: item.mensaje });
       resultados.push({ telefono: tel, ok: true });
-      await new Promise(r => setTimeout(r, 1000)); // pausa entre mensajes
+      await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
       resultados.push({ telefono: tel, ok: false, error: err.message });
     }
