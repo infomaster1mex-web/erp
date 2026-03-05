@@ -33,7 +33,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 const SESIONES_ACTIVAS = (process.env.SESIONES_ACTIVAS || 'avisos')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-const AUTO_MSG = process.env.AUTO_MSG || '¡Hola! 👋 Este número es solo para *avisos automáticos*.\n\nPara atención personalizada escríbenos a nuestro número principal:\n📱 *{{ADMIN_PHONE}}*\n\n— SOS Digital 🌟';
+const AUTO_MSG = process.env.AUTO_MSG || '¡Hola! 👋 Este número es solo para *avisos automáticos*.\n\nPara atención personalizada escríbenos a nuestro número principal:\n📱 *{{ADMIN_PHONE}}*\n\n— Infomaster SOS Digital 🌟';
 
 const SESIONES_CONFIG = {
   avisos:    { nombre: 'Avisos & Recordatorios', color: '#00d4ff', autoReply: true, autoMsg: AUTO_MSG },
