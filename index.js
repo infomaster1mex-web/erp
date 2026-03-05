@@ -1,19 +1,23 @@
 // ═══════════════════════════════════════════════════════════════
 // index.js — Bot WhatsApp SOS Digital (Baileys — sin Chrome)
 // ═══════════════════════════════════════════════════════════════
-const {
-  default: makeWASocket,
+import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeInMemoryStore,
-} = require('@whiskeysockets/baileys');
+} from '@whiskeysockets/baileys';
 
-const express = require('express');
-const qrcode  = require('qrcode');
-const pino    = require('pino');
-const path    = require('path');
-const fs      = require('fs');
+import express from 'express';
+import qrcode from 'qrcode';
+import pino from 'pino';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+// ── ESM equivalente de __dirname ─────────────────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
 const app     = express();
 const PORT    = process.env.PORT || 3000;

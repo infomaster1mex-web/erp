@@ -1,6 +1,7 @@
 {
   "name": "sos-whatsapp-bot",
   "version": "2.0.0",
+  "type": "module",
   "description": "Bot WhatsApp SOS Digital — Baileys (sin Chrome)",
   "main": "index.js",
   "scripts": {

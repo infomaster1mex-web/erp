@@ -6,19 +6,19 @@
 // INSTRUCCIONES:
 //   1. Copia este archivo a tu proyecto Railway.
 //   2. En tu archivo principal (index.js / app.js) agrega:
-//        const sosRouter = require('./sos_whatsapp_route');
-//        app.use('/', sosRouter(client));   // "client" = tu instancia de whatsapp-web.js
+//        import sosRoutes from './sos_whatsapp_route.js';
+//        app.use('/', sosRoutes(client));   // "client" = tu instancia de whatsapp-web.js
 //   3. En Railway → Variables, agrega:
 //        SOS_API_KEY = sos_digital_secret_2025   ← usa el mismo valor que en whatsapp_config.php
 //   4. Redeploy.
 // ═══════════════════════════════════════════════════════════════
 
-const express = require('express');
+import express from 'express';
 
 /**
- * @param {import('whatsapp-web.js').Client} client  Instancia ya inicializada del bot
+ * @param {object} client  Instancia ya inicializada del bot
  */
-module.exports = function sosRoutes(client) {
+export default function sosRoutes(client) {
   const router = express.Router();
   const API_KEY = process.env.SOS_API_KEY || 'sos_digital_secret_2025';
 
@@ -113,4 +113,4 @@ module.exports = function sosRoutes(client) {
   });
 
   return router;
-};
+}
