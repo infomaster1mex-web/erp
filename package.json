@@ -1,8 +1,8 @@
 {
-  "name": "sos-whatsapp-bot",
-  "version": "2.0.0",
+  "name": "sos-whatsapp-hub",
+  "version": "3.0.0",
   "type": "module",
-  "description": "Bot WhatsApp SOS Digital — Baileys (sin Chrome)",
+  "description": "SOS Digital — WhatsApp Multi-Bot Hub (Avisos, Campañas, Grupos, Respaldo)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
