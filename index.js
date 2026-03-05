@@ -33,18 +33,14 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 const SESIONES_ACTIVAS = (process.env.SESIONES_ACTIVAS || 'avisos')
   .split(',').map(s => s.trim()).filter(Boolean);
 
+const AUTO_MSG = process.env.AUTO_MSG || '¡Hola! 👋 Este número es solo para *avisos automáticos*.\n\nPara atención personalizada escríbenos a nuestro número principal:\n📱 *{{ADMIN_PHONE}}*\n\n— SOS Digital 🌟';
+
 const SESIONES_CONFIG = {
-  avisos:    { nombre: 'Avisos & Recordatorios', color: '#00d4ff', autoReply: false },
-  campanas:  { nombre: 'Campañas & Marketing',   color: '#ff6b35', autoReply: false },
-  grupos:    { nombre: 'Publicador de Grupos',    color: '#a855f7', autoReply: false },
-  respaldo1: {
-    nombre: 'Respaldo 1', color: '#6ee7b7', autoReply: true,
-    autoMsg: '¡Hola! 👋 Este número es solo para *avisos automáticos*.\n\nPara atención personalizada escríbenos a nuestro número principal:\n📱 *{{ADMIN_PHONE}}*\n\n— SOS Digital 🌟'
-  },
-  respaldo2: {
-    nombre: 'Respaldo 2', color: '#fbbf24', autoReply: true,
-    autoMsg: '¡Hola! 👋 Este número es solo para *avisos automáticos*.\n\nPara atención personalizada escríbenos a nuestro número principal:\n📱 *{{ADMIN_PHONE}}*\n\n— SOS Digital 🌟'
-  },
+  avisos:    { nombre: 'Avisos & Recordatorios', color: '#00d4ff', autoReply: true, autoMsg: AUTO_MSG },
+  campanas:  { nombre: 'Campañas & Marketing',   color: '#ff6b35', autoReply: true, autoMsg: AUTO_MSG },
+  grupos:    { nombre: 'Publicador de Grupos',    color: '#a855f7', autoReply: true, autoMsg: AUTO_MSG },
+  respaldo1: { nombre: 'Respaldo 1',             color: '#6ee7b7', autoReply: true, autoMsg: AUTO_MSG },
+  respaldo2: { nombre: 'Respaldo 2',             color: '#fbbf24', autoReply: true, autoMsg: AUTO_MSG },
 };
 
 // ── Estado global por sesión ─────────────────────────────────
