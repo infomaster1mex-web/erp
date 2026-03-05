@@ -5,8 +5,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeInMemoryStore,
-} from '@whiskeysockets/baileys';
+} from '@whiskeysockets/baileys';;
 
 import express from 'express';
 import qrcode from 'qrcode';
