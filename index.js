@@ -192,6 +192,8 @@ FORMATO DE ACCIONES (van AL FINAL del mensaje, después de tu texto)
 REGLAS CRÍTICAS
 ━━━━━━━━━━━━━━━━━━━━━━
 ✅ "hazme una imagen de X" → SIEMPRE es generar_imagen, nunca pidas que el admin mande la imagen
+✅ Si el admin especifica modelo ("con gemini", "con flux", "con dalle"), agrégalo: [ACCION:{"tipo":"generar_imagen","prompt":"...","modelo":"gemini"}]
+✅ Modelos disponibles: dalle3, gemini, stability, flux
 ✅ Solo pon [ACCION] cuando el admin haya APROBADO explícitamente
 ✅ Cuando generes una imagen con IA, DESPUÉS de mostrarla pregunta: "¿dónde la mandamos? ¿grupos, estado o ambos?"
 ✅ Para promos, siempre propón el texto del caption antes de ejecutar
@@ -288,24 +290,152 @@ async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones) {
   }
 }
 
-// ── Generar imagen con DALL-E 3 ────────────────────────────
-async function generarImagenDalle(prompt) {
+// ══════════════════════════════════════════════════════════════
+//  GENERADOR DE IMÁGENES MULTI-PROVEEDOR
+//  Modelos disponibles: dalle3 | gemini | stability | flux
+//  Keys en Railway: OPENAI_API_KEY | GEMINI_API_KEY | STABILITY_API_KEY | FAL_API_KEY
+// ══════════════════════════════════════════════════════════════
+
+const GEMINI_KEY    = process.env.GEMINI_API_KEY    || '';
+const STABILITY_KEY = process.env.STABILITY_API_KEY || '';
+const FAL_KEY       = process.env.FAL_API_KEY       || '';
+
+// Modelo por defecto (puede cambiarse con !modelo dalle3|gemini|stability|flux)
+let modeloImagenActual = process.env.MODELO_IMAGEN || 'dalle3';
+
+const MODELOS_INFO = {
+  dalle3:    { nombre: 'DALL-E 3 (OpenAI)',       keyVar: 'OPENAI_API_KEY',    emoji: '🟠' },
+  gemini:    { nombre: 'Imagen 3 (Google Gemini)', keyVar: 'GEMINI_API_KEY',    emoji: '🔵' },
+  stability: { nombre: 'Stable Diffusion (Stability AI)', keyVar: 'STABILITY_API_KEY', emoji: '🟣' },
+  flux:      { nombre: 'FLUX 1.1 Pro (fal.ai)',   keyVar: 'FAL_API_KEY',       emoji: '⚡' },
+};
+
+// Prefijo de prompt base para promos de marketing
+const PROMPT_BASE = 'WhatsApp marketing promotional image for Mexican streaming service reseller SOS Digital. Vibrant colors, bold modern design, professional quality. ';
+
+// ── DALL-E 3 ─────────────────────────────────────────────────
+async function generarConDalle3(prompt) {
+  if (!OPENAI_KEY) throw new Error('Falta OPENAI_API_KEY en Railway Variables');
   const res = await fetch('https://api.openai.com/v1/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_KEY}` },
     body: JSON.stringify({
       model: 'dall-e-3',
-      prompt: `Marketing promotional image for WhatsApp. Mexican streaming service reseller. ${prompt}. Bold text, vibrant colors, professional design, 1024x1024.`,
+      prompt: PROMPT_BASE + prompt,
       n: 1,
       size: '1024x1024',
       response_format: 'b64_json',
+      quality: 'hd',
     })
   });
   const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
+  if (data.error) throw new Error('DALL-E 3: ' + data.error.message);
   const b64 = data.data?.[0]?.b64_json;
-  if (!b64) throw new Error('Sin imagen en respuesta');
+  if (!b64) throw new Error('DALL-E 3: sin imagen en respuesta');
   return Buffer.from(b64, 'base64');
+}
+
+// ── Google Gemini Imagen 3 ────────────────────────────────────
+async function generarConGemini(prompt) {
+  if (!GEMINI_KEY) throw new Error('Falta GEMINI_API_KEY en Railway Variables');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${GEMINI_KEY}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instances: [{ prompt: PROMPT_BASE + prompt }],
+      parameters: {
+        sampleCount: 1,
+        aspectRatio: '1:1',
+        safetyFilterLevel: 'block_few',
+        personGeneration: 'allow_adult',
+      }
+    })
+  });
+  const data = await res.json();
+  if (data.error) throw new Error('Gemini: ' + data.error.message);
+  const b64 = data.predictions?.[0]?.bytesBase64Encoded;
+  if (!b64) throw new Error('Gemini: sin imagen en respuesta');
+  return Buffer.from(b64, 'base64');
+}
+
+// ── Stability AI (Stable Diffusion) ──────────────────────────
+async function generarConStability(prompt) {
+  if (!STABILITY_KEY) throw new Error('Falta STABILITY_API_KEY en Railway Variables');
+  const formData = new FormData();
+  formData.append('prompt', PROMPT_BASE + prompt);
+  formData.append('aspect_ratio', '1:1');
+  formData.append('output_format', 'png');
+  formData.append('style_preset', 'digital-art');
+
+  const res = await fetch('https://api.stability.ai/v2beta/stable-image/generate/core', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${STABILITY_KEY}`,
+      'Accept': 'image/*',
+    },
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error('Stability AI: ' + err);
+  }
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+// ── FLUX 1.1 Pro via fal.ai ───────────────────────────────────
+async function generarConFlux(prompt) {
+  if (!FAL_KEY) throw new Error('Falta FAL_API_KEY en Railway Variables');
+
+  // Enviar request
+  const resSubmit = await fetch('https://queue.fal.run/fal-ai/flux-pro/v1.1', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Key ${FAL_KEY}`,
+    },
+    body: JSON.stringify({
+      prompt: PROMPT_BASE + prompt,
+      image_size: 'square_hd',
+      num_images: 1,
+      safety_tolerance: '2',
+    })
+  });
+  const submitData = await resSubmit.json();
+  if (!submitData.request_id) throw new Error('FLUX: no se obtuvo request_id');
+
+  // Polling del resultado
+  const requestId = submitData.request_id;
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const resStatus = await fetch(`https://queue.fal.run/fal-ai/flux-pro/v1.1/requests/${requestId}`, {
+      headers: { 'Authorization': `Key ${FAL_KEY}` }
+    });
+    const statusData = await resStatus.json();
+    if (statusData.status === 'COMPLETED' || statusData.images) {
+      const imgUrl = statusData.images?.[0]?.url || statusData.output?.images?.[0]?.url;
+      if (!imgUrl) throw new Error('FLUX: sin URL de imagen en respuesta');
+      const imgRes = await fetch(imgUrl);
+      const arrBuf = await imgRes.arrayBuffer();
+      return Buffer.from(arrBuf);
+    }
+    if (statusData.status === 'FAILED') throw new Error('FLUX: generación fallida');
+  }
+  throw new Error('FLUX: timeout esperando resultado');
+}
+
+// ── Función principal: delega al proveedor activo ─────────────
+async function generarImagen(prompt, modelo = null) {
+  const m = modelo || modeloImagenActual;
+  console.log(`[IMG] Generando con: ${m} | prompt: ${prompt.slice(0,60)}...`);
+  switch (m) {
+    case 'gemini':    return await generarConGemini(prompt);
+    case 'stability': return await generarConStability(prompt);
+    case 'flux':      return await generarConFlux(prompt);
+    case 'dalle3':
+    default:          return await generarConDalle3(prompt);
+  }
 }
 
 // ── Ejecutar acción ─────────────────────────────────────────
@@ -348,7 +478,7 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
   if (accion.tipo === 'generar_imagen') {
     await replyFn('🎨 Generando imagen con IA, espera unos segundos...');
     try {
-      const buf = await generarImagenDalle(accion.prompt);
+      const buf = await generarImagen(accion.prompt, accion.modelo || null);
       // Guardar imagen en pending pero SIN acción predefinida — preguntamos al admin
       adminPending.imgBuffer = buf;
       adminPending.accion = {
@@ -834,7 +964,9 @@ async function conectarSesion(sesionId) {
             '📊 "dame el reporte de sesiones"\n' +
             '💾 "guarda esta plantilla como promo_netflix"\n\n' +
             '🔄 Escribe *!reset* si el bot se confunde\n' +
-            '📋 Escribe *!estado* para ver programaciones activas'
+            '📋 Escribe *!estado* para ver programaciones activas\n' +
+            '🎨 Escribe *!modelo* para ver/cambiar modelo de imágenes\n\n' +
+            '_Modelos: dalle3 | gemini | stability | flux_'
           );
           continue;
         }
@@ -849,6 +981,28 @@ async function conectarSesion(sesionId) {
             });
             lines.push('\nPara cancelar di: _"cancela [ID]"_');
             await reply(lines.join('\n'));
+          }
+          continue;
+        }
+
+        // Cambiar modelo de generación de imágenes
+        if (textoCmds.startsWith('!modelo')) {
+          const partes = textoCmds.split(' ');
+          const nuevoModelo = partes[1]?.toLowerCase();
+          const modelosValidos = Object.keys(MODELOS_INFO);
+          if (!nuevoModelo || !modelosValidos.includes(nuevoModelo)) {
+            const lista = modelosValidos.map(m => {
+              const info = MODELOS_INFO[m];
+              const tieneKey = m === 'dalle3' ? !!OPENAI_KEY : m === 'gemini' ? !!GEMINI_KEY : m === 'stability' ? !!STABILITY_KEY : !!FAL_KEY;
+              const activo = m === modeloImagenActual ? ' ← *activo*' : '';
+              const keyStatus = tieneKey ? '✅' : '❌ (falta key)';
+              return `${info.emoji} *${m}* — ${info.nombre} ${keyStatus}${activo}`;
+            }).join('\n');
+            await reply(`🎨 *Modelos de imagen disponibles:*\n\n${lista}\n\n_Usa: !modelo dalle3 | !modelo gemini | !modelo stability | !modelo flux_`);
+          } else {
+            modeloImagenActual = nuevoModelo;
+            const info = MODELOS_INFO[nuevoModelo];
+            await reply(`${info.emoji} Modelo cambiado a *${info.nombre}*\nLas próximas imágenes se generarán con este modelo.`);
           }
           continue;
         }
