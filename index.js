@@ -58,6 +58,25 @@ for (const id of SESIONES_ACTIVAS) {
   }
 }
 
+// ── Helpers para persistir contactos en disco ───────────────
+function cargarContactos(sesionId) {
+  const file = path.join(__dirname, 'auth_info', sesionId, 'contacts_cache.json');
+  try {
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return new Set(Array.isArray(data) ? data : []);
+    }
+  } catch(e) {}
+  return new Set();
+}
+
+function guardarContactos(sesionId, contactSet) {
+  try {
+    const file = path.join(__dirname, 'auth_info', sesionId, 'contacts_cache.json');
+    fs.writeFileSync(file, JSON.stringify(Array.from(contactSet)));
+  } catch(e) {}
+}
+
 // ── Crear/conectar una sesión ────────────────────────────────
 async function conectarSesion(sesionId) {
   const cfg  = SESIONES_CONFIG[sesionId];
@@ -66,6 +85,10 @@ async function conectarSesion(sesionId) {
 
   const authDir = path.join(__dirname, 'auth_info', sesionId);
   if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+
+  // Cargar contactos guardados en disco (persisten entre reinicios de Railway)
+  s.contactos = cargarContactos(sesionId);
+  console.log(`[${sesionId}] Contactos cargados del disco: ${s.contactos.size}`);
 
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version }          = await fetchLatestBaileysVersion();
@@ -112,49 +135,42 @@ async function conectarSesion(sesionId) {
     }
   });
 
-  // ── Poblar caché de contactos ─────────────────────────────
-  // messaging-history.set dispara en el sync inicial con TODOS los chats/contactos
-  s.sock.ev.on('messaging-history.set', ({ contacts = [], chats = [] }) => {
-    let n = 0;
-    for (const c of contacts) {
-      const jid = c.id;
-      if (jid && jid.endsWith('@s.whatsapp.net')) { s.contactos.add(jid); n++; }
-    }
-    for (const ch of chats) {
-      const jid = ch.id;
-      if (jid && jid.endsWith('@s.whatsapp.net')) { s.contactos.add(jid); n++; }
-    }
-    if (n > 0) console.log(`[${sesionId}] messaging-history.set → +${n} (total: ${s.contactos.size})`);
-  });
-
-  // chats.upsert también llega con chats al conectar
-  s.sock.ev.on('chats.upsert', (chats) => {
-    let n = 0;
-    for (const ch of chats) {
-      const jid = ch.id;
-      if (jid && jid.endsWith('@s.whatsapp.net')) { s.contactos.add(jid); n++; }
-    }
-    if (n > 0) console.log(`[${sesionId}] chats.upsert → +${n} (total: ${s.contactos.size})`);
-  });
-
-  // contacts.upsert como refuerzo adicional
-  s.sock.ev.on('contacts.upsert', (contacts) => {
-    let n = 0;
-    for (const c of contacts) {
-      const jid = c.id || c.notify;
-      if (jid && jid.endsWith('@s.whatsapp.net')) { s.contactos.add(jid); n++; }
-    }
-    if (n > 0) console.log(`[${sesionId}] contacts.upsert → +${n} (total: ${s.contactos.size})`);
-  });
-
-  // También acumular de mensajes entrantes
-  s.sock.ev.on('messages.upsert', async ({ messages }) => {
-    for (const msg of messages) {
-      const jid = msg.key?.remoteJid;
-      if (jid && jid.endsWith('@s.whatsapp.net') && !jid.includes('status@')) {
+  // ── Poblar y persistir caché de contactos ────────────────
+  // Helper para agregar y guardar
+  const addContactos = (jids) => {
+    const antes = s.contactos.size;
+    for (const jid of jids) {
+      if (jid && jid.endsWith('@s.whatsapp.net') && !jid.includes('status@broadcast')) {
         s.contactos.add(jid);
       }
     }
+    if (s.contactos.size > antes) {
+      guardarContactos(sesionId, s.contactos);
+      console.log(`[${sesionId}] contactos guardados: ${s.contactos.size}`);
+    }
+  };
+
+  // messaging-history.set — solo en conexiones nuevas (QR), pero igual lo escuchamos
+  s.sock.ev.on('messaging-history.set', ({ contacts = [], chats = [] }) => {
+    addContactos([
+      ...contacts.map(c => c.id),
+      ...chats.map(c => c.id),
+    ]);
+  });
+
+  // chats.upsert — llega en reconexiones con los chats activos
+  s.sock.ev.on('chats.upsert', (chats) => {
+    addContactos(chats.map(c => c.id));
+  });
+
+  // contacts.upsert — refuerzo
+  s.sock.ev.on('contacts.upsert', (contacts) => {
+    addContactos(contacts.map(c => c.id || c.notify).filter(Boolean));
+  });
+
+  // messages.upsert — acumula de cada mensaje que llega
+  s.sock.ev.on('messages.upsert', async ({ messages }) => {
+    addContactos(messages.map(m => m.key?.remoteJid).filter(Boolean));
   });
 
   // ── Auto-reply para sesiones de respaldo ──────────────────
