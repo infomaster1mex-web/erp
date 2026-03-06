@@ -526,9 +526,9 @@ app.post('/grupos/enviar', auth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 
 // Publicar imagen como estado (story) en una sesión
-// Fix: Baileys requiere statusJidList para que el estado llegue correctamente
+// Fix: acepta lista de contactos desde PHP (base de datos) y la combina con el caché local
 app.post('/estado/publicar', auth, async (req, res) => {
-  const { sesion, imagen_base64, caption = '' } = req.body;
+  const { sesion, imagen_base64, caption = '', contactos = [] } = req.body;
 
   if (!sesion) {
     return res.json({ success: false, message: 'Falta parámetro: sesion' });
@@ -546,28 +546,58 @@ app.post('/estado/publicar', auth, async (req, res) => {
   }
 
   try {
-    const imgBuffer = Buffer.from(imagen_base64, 'base64');
+    // Limpiar base64 por si viene con prefijo data:image/...;base64,
+    const rawB64 = imagen_base64.includes(',') ? imagen_base64.split(',')[1] : imagen_base64;
+    const imgBuffer = Buffer.from(rawB64, 'base64');
 
-    // Usar el caché de contactos acumulado por messaging-history.set / chats.upsert
-    // Incluir el propio JID de la sesión — WhatsApp lo requiere para procesar el estado
+    // ── Construir statusJidList ──────────────────────────────
+    // Prioridad: 1) lista de contactos enviada desde PHP (BD de clientes)
+    //            2) caché local acumulado por mensajes/chats
+    const jidSet = new Set();
+
+    // 1) Contactos del ERP (teléfonos de la BD convertidos a JIDs)
+    if (Array.isArray(contactos) && contactos.length > 0) {
+      for (const tel of contactos) {
+        const limpio = String(tel).replace(/\D/g, '');
+        if (limpio.length >= 10) jidSet.add(limpio + '@s.whatsapp.net');
+      }
+      // Actualizar caché local con estos contactos
+      addContactos(sesion, Array.from(jidSet));
+    }
+
+    // 2) Caché local acumulado
+    for (const jid of s.contactos) jidSet.add(jid);
+
+    // 3) Propio JID de la sesión (requerido por WhatsApp)
     const propioJid = s.numero ? s.numero + '@s.whatsapp.net' : null;
-    const statusJidList = Array.from(s.contactos).slice(0, 500);
-    if (propioJid && !statusJidList.includes(propioJid)) statusJidList.unshift(propioJid);
-    console.log(`[estado] Sesión "${sesion}" → ${statusJidList.length} contactos en caché`);
+    if (propioJid) jidSet.add(propioJid);
 
-    const msgPayload = { image: imgBuffer };
+    const statusJidList = Array.from(jidSet).slice(0, 1000);
+    console.log(`[estado] Sesión "${sesion}" → ${statusJidList.length} contactos en statusJidList`);
+
+    if (statusJidList.length === 0) {
+      return res.json({ success: false, message: `Sesión "${sesion}": sin contactos para publicar estado. Envía mensajes primero o espera que se cargue el historial.` });
+    }
+
+    // Detectar tipo MIME desde el buffer
+    const isJpeg = imgBuffer[0] === 0xFF && imgBuffer[1] === 0xD8;
+    const isPng  = imgBuffer[0] === 0x89 && imgBuffer[1] === 0x50;
+    const mimetype = isJpeg ? 'image/jpeg' : isPng ? 'image/png' : 'image/jpeg';
+
+    const msgPayload = { image: imgBuffer, mimetype };
     if (caption && caption.trim()) msgPayload.caption = caption.trim();
 
     await s.sock.sendMessage(
       'status@broadcast',
       msgPayload,
-      { statusJidList }   // <-- esto es lo que hace que llegue
+      { statusJidList }
     );
 
     console.log(`[estado] ✅ Estado publicado en sesión "${sesion}" → ${statusJidList.length} contactos`);
     res.json({
       success: true,
-      message: `Estado publicado en sesión "${sesion}" (${statusJidList.length} contactos)`
+      message: `Estado publicado en sesión "${sesion}" (${statusJidList.length} contactos)`,
+      contactos: statusJidList.length,
     });
 
   } catch (err) {
@@ -575,6 +605,17 @@ app.post('/estado/publicar', auth, async (req, res) => {
     res.json({ success: false, message: err.message || 'Error al publicar estado' });
   }
 });
+
+// Helper: añadir JIDs al caché de una sesión específica
+function addContactos(sesionId, jids) {
+  const s = sesiones[sesionId];
+  if (!s) return;
+  const antes = s.contactos.size;
+  for (const jid of jids) {
+    if (jid && jid.endsWith('@s.whatsapp.net')) s.contactos.add(jid);
+  }
+  if (s.contactos.size > antes) guardarContactos(sesionId, s.contactos);
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  ARRANCAR TODAS LAS SESIONES
