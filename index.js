@@ -454,6 +454,48 @@ app.post('/grupos/enviar', auth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+//  RUTAS — ESTADO / STORY WHATSAPP
+// ═══════════════════════════════════════════════════════════════
+
+// Publicar imagen como estado (story) en una sesión
+// Llamado desde marketing_api.php → enviarEstadoWA()
+app.post('/estado/publicar', auth, async (req, res) => {
+  const { sesion, imagen_base64, caption = '' } = req.body;
+
+  if (!sesion) {
+    return res.json({ success: false, message: 'Falta parámetro: sesion' });
+  }
+  if (!imagen_base64) {
+    return res.json({ success: false, message: 'Falta parámetro: imagen_base64' });
+  }
+
+  const s = sesiones[sesion];
+  if (!s) {
+    return res.json({ success: false, message: `Sesión "${sesion}" no existe en este hub` });
+  }
+  if (!s.listo) {
+    return res.json({ success: false, message: `Sesión "${sesion}" no está conectada` });
+  }
+
+  try {
+    const imgBuffer = Buffer.from(imagen_base64, 'base64');
+
+    const msgPayload = { image: imgBuffer };
+    if (caption && caption.trim()) msgPayload.caption = caption.trim();
+
+    // 'status@broadcast' es el JID especial de estados en Baileys
+    await s.sock.sendMessage('status@broadcast', msgPayload);
+
+    console.log(`[estado] ✅ Estado publicado en sesión "${sesion}"`);
+    res.json({ success: true, message: `Estado publicado en sesión "${sesion}"` });
+
+  } catch (err) {
+    console.error(`[estado] ❌ Error en sesión "${sesion}":`, err.message);
+    res.json({ success: false, message: err.message || 'Error al publicar estado' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
 //  ARRANCAR TODAS LAS SESIONES
 // ═══════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
