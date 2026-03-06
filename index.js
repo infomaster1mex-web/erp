@@ -95,19 +95,6 @@ async function conectarSesion(sesionId) {
       s.reconectando = false;
       s.numero = s.sock.user?.id?.split(':')[0] || null;
       console.log(`[${sesionId}] ✅ Conectado: ${s.numero}`);
-
-      // Poblar caché de contactos desde los chats existentes
-      try {
-        const chats = await s.sock.groupFetchAllParticipating().catch(() => ({}));
-        // También intentar obtener lista de chats (contacts individuales)
-        setTimeout(async () => {
-          try {
-            // groupFetchAllParticipating solo da grupos; para individuales
-            // los vamos acumulando en messages.upsert
-            console.log(`[${sesionId}] Caché contactos iniciado (${s.contactos.size} hasta ahora)`);
-          } catch(e) {}
-        }, 3000);
-      } catch(e) {}
     }
 
     if (connection === 'close') {
@@ -125,7 +112,23 @@ async function conectarSesion(sesionId) {
     }
   });
 
-  // ── Acumular contactos para statusJidList ─────────────────
+  // ── Poblar caché de contactos desde sync inicial de Baileys ──
+  // contacts.upsert dispara al conectar con TODOS los contactos de WA
+  s.sock.ev.on('contacts.upsert', (contacts) => {
+    let nuevos = 0;
+    for (const c of contacts) {
+      const jid = c.id || c.notify;
+      if (jid && jid.endsWith('@s.whatsapp.net')) {
+        s.contactos.add(jid);
+        nuevos++;
+      }
+    }
+    if (nuevos > 0) {
+      console.log(`[${sesionId}] contacts.upsert → +${nuevos} contactos (total: ${s.contactos.size})`);
+    }
+  });
+
+  // También acumular de mensajes entrantes (refuerzo)
   s.sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       const jid = msg.key?.remoteJid;
