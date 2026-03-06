@@ -112,23 +112,42 @@ async function conectarSesion(sesionId) {
     }
   });
 
-  // ── Poblar caché de contactos desde sync inicial de Baileys ──
-  // contacts.upsert dispara al conectar con TODOS los contactos de WA
-  s.sock.ev.on('contacts.upsert', (contacts) => {
-    let nuevos = 0;
+  // ── Poblar caché de contactos ─────────────────────────────
+  // messaging-history.set dispara en el sync inicial con TODOS los chats/contactos
+  s.sock.ev.on('messaging-history.set', ({ contacts = [], chats = [] }) => {
+    let n = 0;
     for (const c of contacts) {
-      const jid = c.id || c.notify;
-      if (jid && jid.endsWith('@s.whatsapp.net')) {
-        s.contactos.add(jid);
-        nuevos++;
-      }
+      const jid = c.id;
+      if (jid && jid.endsWith('@s.whatsapp.net')) { s.contactos.add(jid); n++; }
     }
-    if (nuevos > 0) {
-      console.log(`[${sesionId}] contacts.upsert → +${nuevos} contactos (total: ${s.contactos.size})`);
+    for (const ch of chats) {
+      const jid = ch.id;
+      if (jid && jid.endsWith('@s.whatsapp.net')) { s.contactos.add(jid); n++; }
     }
+    if (n > 0) console.log(`[${sesionId}] messaging-history.set → +${n} (total: ${s.contactos.size})`);
   });
 
-  // También acumular de mensajes entrantes (refuerzo)
+  // chats.upsert también llega con chats al conectar
+  s.sock.ev.on('chats.upsert', (chats) => {
+    let n = 0;
+    for (const ch of chats) {
+      const jid = ch.id;
+      if (jid && jid.endsWith('@s.whatsapp.net')) { s.contactos.add(jid); n++; }
+    }
+    if (n > 0) console.log(`[${sesionId}] chats.upsert → +${n} (total: ${s.contactos.size})`);
+  });
+
+  // contacts.upsert como refuerzo adicional
+  s.sock.ev.on('contacts.upsert', (contacts) => {
+    let n = 0;
+    for (const c of contacts) {
+      const jid = c.id || c.notify;
+      if (jid && jid.endsWith('@s.whatsapp.net')) { s.contactos.add(jid); n++; }
+    }
+    if (n > 0) console.log(`[${sesionId}] contacts.upsert → +${n} (total: ${s.contactos.size})`);
+  });
+
+  // También acumular de mensajes entrantes
   s.sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       const jid = msg.key?.remoteJid;
@@ -513,9 +532,11 @@ app.post('/estado/publicar', auth, async (req, res) => {
   try {
     const imgBuffer = Buffer.from(imagen_base64, 'base64');
 
-    // Usar el caché de contactos acumulado por messages.upsert
-    // Baileys requiere statusJidList para que el estado realmente llegue
+    // Usar el caché de contactos acumulado por messaging-history.set / chats.upsert
+    // Incluir el propio JID de la sesión — WhatsApp lo requiere para procesar el estado
+    const propioJid = s.numero ? s.numero + '@s.whatsapp.net' : null;
     const statusJidList = Array.from(s.contactos).slice(0, 500);
+    if (propioJid && !statusJidList.includes(propioJid)) statusJidList.unshift(propioJid);
     console.log(`[estado] Sesión "${sesion}" → ${statusJidList.length} contactos en caché`);
 
     const msgPayload = { image: imgBuffer };
