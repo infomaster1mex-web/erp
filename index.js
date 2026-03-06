@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
 // index.js — SOS Digital WhatsApp Multi-Bot (Baileys)
-// Sesiones: avisos | campañas | grupos | respaldo1 | respaldo2
+// Sesiones: avisos | campanas | grupos | respaldo1 | respaldo2 | personal
 // ═══════════════════════════════════════════════════════════════
 import makeWASocket, {
   useMultiFileAuthState,
@@ -22,6 +22,8 @@ const app     = express();
 const PORT    = process.env.PORT || 3000;
 const API_KEY = process.env.SOS_API_KEY || 'sos_digital_secret_2025';
 const ADMIN_PHONE = process.env.ADMIN_PHONE || '';  // Tu WhatsApp personal (ej: 524491234567)
+const CMD_PHONE    = process.env.CMD_PHONE    || ADMIN_PHONE; // Número que da órdenes al bot
+const CMD_SESION  = process.env.CMD_SESION  || 'grupos'; // Sesión que recibe tus comandos
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -41,6 +43,7 @@ const SESIONES_CONFIG = {
   grupos:    { nombre: 'Publicador de Grupos',    color: '#a855f7', autoReply: true, autoMsg: AUTO_MSG },
   respaldo1: { nombre: 'Respaldo 1',             color: '#6ee7b7', autoReply: true, autoMsg: AUTO_MSG },
   respaldo2: { nombre: 'Respaldo 2',             color: '#fbbf24', autoReply: true, autoMsg: AUTO_MSG },
+  personal:  { nombre: 'Personal (Cristian)',    color: '#ec4899', autoReply: false, autoMsg: AUTO_MSG },
 };
 
 // ── Estado global por sesión ─────────────────────────────────
@@ -172,6 +175,152 @@ async function conectarSesion(sesionId) {
   s.sock.ev.on('messages.upsert', async ({ messages }) => {
     addContactos(messages.map(m => m.key?.remoteJid).filter(Boolean));
   });
+
+  // ── Handler de comandos (solo sesión CMD_SESION + CMD_PHONE) ──
+  if (sesionId === CMD_SESION) {
+    s.sock.ev.on('messages.upsert', async ({ messages }) => {
+      for (const msg of messages) {
+        if (msg.key.fromMe) continue;
+        if (!msg.message) continue;
+        const fromJid = msg.key.remoteJid;
+        if (!fromJid || fromJid.includes('@g.us') || fromJid.includes('status@')) continue;
+
+        // Solo aceptar comandos del número administrador
+        const adminJid = CMD_PHONE ? CMD_PHONE.replace(/\D/g,'') + '@s.whatsapp.net' : null;
+        if (!adminJid || fromJid !== adminJid) continue;
+
+        // Extraer texto e imagen adjunta
+        const texto = (
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text ||
+          msg.message?.imageMessage?.caption || ''
+        ).trim();
+
+        const tieneImagen = !!(
+          msg.message?.imageMessage ||
+          msg.message?.documentMessage
+        );
+
+        // Descargar imagen si viene adjunta
+        let imgBuffer = null;
+        if (tieneImagen) {
+          try {
+            const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+            imgBuffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: s.sock.updateMediaMessage });
+          } catch(e) {
+            console.error('[CMD] Error descargando imagen:', e.message);
+          }
+        }
+
+        const cmd = texto.toLowerCase().split(' ')[0];
+        const args = texto.slice(cmd.length).trim();
+
+        console.log(`[CMD] Comando recibido: "${cmd}" args="${args}" imagen=${!!imgBuffer}`);
+
+        // ── Responder helper ─────────────────────────────────
+        const reply = async (txt) => {
+          try { await s.sock.sendMessage(fromJid, { text: txt }); } catch(e) {}
+        };
+
+        // ╔══════════════════════════════════════════════════╗
+        // ║  !estado — Publicar imagen como estado WA        ║
+        // ╚══════════════════════════════════════════════════╝
+        if (cmd === '!estado' || cmd === '!status_wa') {
+          if (!imgBuffer) { await reply('❌ Adjunta una imagen para publicar como estado.'); continue; }
+          const sesionesTarget = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo);
+          if (!sesionesTarget.length) { await reply('❌ No hay sesiones conectadas.'); continue; }
+          await reply(`⏳ Publicando estado en ${sesionesTarget.length} sesión(es)...`);
+          const imgB64 = imgBuffer.toString('base64');
+          let ok = 0, fail = 0;
+          for (const sid of sesionesTarget) {
+            try {
+              const ss = sesiones[sid];
+              const jidSet = new Set(ss.contactos);
+              if (ss.numero) jidSet.add(ss.numero + '@s.whatsapp.net');
+              const statusJidList = Array.from(jidSet).slice(0, 1000);
+              if (!statusJidList.length) { fail++; continue; }
+              const isJpeg = imgBuffer[0]===0xFF && imgBuffer[1]===0xD8;
+              await ss.sock.sendMessage('status@broadcast', {
+                image: imgBuffer,
+                mimetype: isJpeg ? 'image/jpeg' : 'image/png',
+                ...(args ? { caption: args } : {})
+              }, { statusJidList });
+              ok++;
+              await new Promise(r => setTimeout(r, 1500));
+            } catch(e) { fail++; console.error(`[CMD] Error estado ${sid}:`, e.message); }
+          }
+          await reply(`✅ Estado publicado: ${ok} sesión(es) OK, ${fail} fallidas.`);
+          continue;
+        }
+
+        // ╔══════════════════════════════════════════════════╗
+        // ║  !grupos — Enviar imagen+texto a todos los       ║
+        // ║            grupos de la sesión grupos             ║
+        // ╚══════════════════════════════════════════════════╝
+        if (cmd === '!grupos') {
+          if (!imgBuffer) { await reply('❌ Adjunta una imagen para enviar a los grupos.'); continue; }
+          const sg = sesiones['grupos'] || sesiones[sesionId];
+          if (!sg?.listo) { await reply('❌ La sesión "grupos" no está conectada.'); continue; }
+          await reply('⏳ Obteniendo lista de grupos...');
+          try {
+            const groups = await sg.sock.groupFetchAllParticipating();
+            const gids = Object.keys(groups);
+            if (!gids.length) { await reply('❌ No hay grupos disponibles.'); continue; }
+            await reply(`📤 Enviando a ${gids.length} grupos...`);
+            let ok = 0, fail = 0;
+            const isJpeg = imgBuffer[0]===0xFF && imgBuffer[1]===0xD8;
+            for (const gid of gids) {
+              try {
+                await sg.sock.sendMessage(gid, {
+                  image: imgBuffer,
+                  mimetype: isJpeg ? 'image/jpeg' : 'image/png',
+                  ...(args ? { caption: args } : {})
+                });
+                ok++;
+                await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
+              } catch(e) { fail++; }
+            }
+            await reply(`✅ Grupos: ${ok} OK, ${fail} fallidos de ${gids.length} totales.`);
+          } catch(e) {
+            await reply('❌ Error obteniendo grupos: ' + e.message);
+          }
+          continue;
+        }
+
+        // ╔══════════════════════════════════════════════════╗
+        // ║  !report / !reporte — Estado del sistema         ║
+        // ╚══════════════════════════════════════════════════╝
+        if (cmd === '!reporte' || cmd === '!report' || cmd === '!r') {
+          const lines = ['📊 *Reporte SOS Digital*\n'];
+          for (const [id, ss] of Object.entries(sesiones)) {
+            const icono = ss.listo ? '🟢' : '🔴';
+            lines.push(`${icono} *${id}* — ${ss.listo ? '+'+ss.numero : 'Offline'} (${ss.contactos?.size||0} contactos)`);
+          }
+          lines.push('\n🤖 Bot operando correctamente');
+          await reply(lines.join('\n'));
+          continue;
+        }
+
+        // ╔══════════════════════════════════════════════════╗
+        // ║  !ayuda — Lista de comandos disponibles          ║
+        // ╚══════════════════════════════════════════════════╝
+        if (cmd === '!ayuda' || cmd === '!help' || cmd === '!h') {
+          await reply(
+            '🤖 *Comandos disponibles*\n\n' +
+            '📸 *!estado* + imagen — Publica en todos los estados WA\n' +
+            '👥 *!grupos* + imagen — Envía a todos los grupos\n' +
+            '📊 *!reporte* — Estado de sesiones\n' +
+            '❓ *!ayuda* — Esta ayuda\n\n' +
+            '_Puedes agregar texto como caption después del comando_'
+          );
+          continue;
+        }
+
+        // Comando desconocido
+        await reply('❓ Comando no reconocido. Escribe *!ayuda* para ver los comandos disponibles.');
+      }
+    });
+  }
 
   // ── Auto-reply para sesiones de respaldo ──────────────────
   if (cfg.autoReply) {
