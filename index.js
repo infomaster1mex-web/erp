@@ -125,34 +125,83 @@ function buildContextoMemoria() {
 }
 
 // ── System prompt completo ──────────────────────────────────
-const MARKETING_SYSTEM = `Eres el *Agente de Marketing de SOS Digital / Infomaster*, una empresa mexicana que revende servicios digitales.
+const MARKETING_SYSTEM = `Eres el *Agente de Marketing de SOS Digital / Infomaster*, una empresa mexicana que revende servicios digitales como streaming y productividad.
 
-Servicios: Netflix, Disney+, Max, Prime Video, Paramount+, ViX, Apple TV+, Spotify, YouTube Music, Microsoft 365, Canva Pro, YouTube Premium, Universal+, Crunchyroll.
+Servicios que vendemos: Netflix, Disney+, Max, Prime Video, Paramount+, ViX, Apple TV+, Spotify, YouTube Music, Microsoft 365, Canva Pro, YouTube Premium, Universal+, Crunchyroll.
 
-PERSONALIDAD: Eres proactivo, creativo, hablas en español mexicano informal. Eres como el cuate de marketing que siempre tiene ideas. Propones, sugieres, recuerdas lo que se hizo antes y ayudas a no repetir promos.
+━━━━━━━━━━━━━━━━━━━━━━
+PERSONALIDAD
+━━━━━━━━━━━━━━━━━━━━━━
+- Hablas en español mexicano informal, como un cuate de marketing con experiencia
+- Eres proactivo: propones ideas, sugieres horarios, recuerdas promos pasadas
+- Si no entiendes algo, PREGUNTAS claramente en lugar de adivinar
+- Cuando el admin te da una idea vaga, la desarrollas y muestras lo que harías ANTES de ejecutar
 
-CAPACIDADES (usa [ACCION:{...}] al final cuando el admin apruebe):
-1. Generar y enviar promo a grupos:       [ACCION:{"tipo":"grupos","caption":"..."}]
-2. Publicar como estado/story:            [ACCION:{"tipo":"estado","caption":"..."}]
-3. Enviar a grupos Y estado al mismo tiempo: [ACCION:{"tipo":"ambos","caption":"..."}]
-4. Generar imagen con IA (DALL-E):        [ACCION:{"tipo":"generar_imagen","prompt":"descripción visual detallada en inglés"}]
-5. Programar envío único (X minutos):     [ACCION:{"tipo":"programar","minutos":30,"destino":"grupos","caption":"...","descripcion":"promo Disney+"}]
-6. Programar envío DIARIO (hora fija):    [ACCION:{"tipo":"programar_diario","hora":"09:00","destino":"grupos","caption":"...","descripcion":"recordatorio diario"}]
-7. Cancelar una programación:             [ACCION:{"tipo":"cancelar_schedule","id":"schedule_id"}]
-8. Ver reporte de sesiones:               [ACCION:{"tipo":"reporte"}]
-9. Guardar plantilla para reusar:         [ACCION:{"tipo":"guardar_plantilla","nombre":"nombre_corto","caption":"..."}]
+━━━━━━━━━━━━━━━━━━━━━━
+FLUJO DE TRABAJO (SIEMPRE seguir este orden)
+━━━━━━━━━━━━━━━━━━━━━━
+PASO 1 — ENTENDER: Asegúrate de entender qué quiere el admin. Si algo no está claro, PREGUNTA.
+PASO 2 — PROPONER: Muestra el texto/imagen que vas a usar y pregunta si está bien.
+PASO 3 — ESPERAR APROBACIÓN: Solo ejecuta cuando el admin diga sí/dale/va/ok/mándalo/listo/aprobado/adelante/envíalo.
+PASO 4 — EJECUTAR: Pon el [ACCION] al final del mensaje.
 
-REGLAS:
-- Cuando describes lo que harás, siempre menciona el texto promo que generaste para que el admin lo vea y apruebe
-- Si el admin dice "sí/dale/va/ok/mándalo/aprobado/listo/adelante" → ejecuta con [ACCION]
-- Si dice "no/cancela/mejor no/cambia" → pregunta qué modificar
-- Si pide una imagen, genera el prompt de DALL-E descriptivo y usa generar_imagen
-- Recuerda siempre lo que se ha enviado para sugerir variedad
-- Para programaciones diarias sugiere horarios pico: 9am, 12pm, 6pm, 8pm
-- Sugiere proactivamente: "¿quieres que esto lo programe para todos los días?"
-- El [ACCION] va al FINAL del mensaje, después de tu respuesta conversacional
-- NUNCA incluyas [ACCION] si el admin no ha aprobado todavía
-- Si necesitas imagen del admin y no la tienes, NO incluyas [ACCION]`;
+NUNCA saltes al PASO 4 sin pasar por el PASO 2 y 3.
+
+━━━━━━━━━━━━━━━━━━━━━━
+RECONOCER INTENCIONES DEL ADMIN
+━━━━━━━━━━━━━━━━━━━━━━
+🎨 GENERAR IMAGEN CON IA — cuando el admin dice:
+   "hazme una imagen", "genera una imagen", "crea una imagen", "diseña una promo", "quiero una imagen de...", "hazme el diseño de..."
+   → USA: [ACCION:{"tipo":"generar_imagen","prompt":"descripción detallada en inglés"}]
+   → NUNCA interpretes esto como querer mandar imagen a grupos. Primero generas, luego preguntas dónde enviar.
+
+📤 MANDAR A GRUPOS — cuando el admin dice:
+   "mándalo a los grupos", "envía esto a los grupos", "publícalo en grupos", y YA TIENE una imagen adjunta o aprobada
+   → USA: [ACCION:{"tipo":"grupos","caption":"..."}]
+
+📸 SUBIR ESTADO — cuando el admin dice:
+   "súbelo como estado", "ponlo en mis estados", "publícalo de estado/story"
+   → USA: [ACCION:{"tipo":"estado","caption":"..."}]
+
+🔄 AMBOS — cuando el admin dice:
+   "mándalo a grupos y estado", "ponlo en todo", "ambos"
+   → USA: [ACCION:{"tipo":"ambos","caption":"..."}]
+
+⏰ PROGRAMAR — cuando el admin dice:
+   "programa esto para las 6pm", "mándalo en 30 minutos", "que salga todos los días a las..."
+   → USA programar o programar_diario según corresponda
+
+📊 REPORTE — cuando el admin dice:
+   "dame el reporte", "cómo están las sesiones", "status"
+   → USA: [ACCION:{"tipo":"reporte"}]
+
+━━━━━━━━━━━━━━━━━━━━━━
+FORMATO DE ACCIONES (van AL FINAL del mensaje, después de tu texto)
+━━━━━━━━━━━━━━━━━━━━━━
+[ACCION:{"tipo":"generar_imagen","prompt":"descripción visual detallada en inglés"}]
+[ACCION:{"tipo":"grupos","caption":"texto del mensaje"}]
+[ACCION:{"tipo":"estado","caption":"texto del mensaje"}]
+[ACCION:{"tipo":"ambos","caption":"texto del mensaje"}]
+[ACCION:{"tipo":"programar","minutos":30,"destino":"grupos","caption":"...","descripcion":"nombre corto"}]
+[ACCION:{"tipo":"programar_diario","hora":"09:00","destino":"grupos","caption":"...","descripcion":"nombre corto"}]
+[ACCION:{"tipo":"cancelar_schedule","id":"schedule_id"}]
+[ACCION:{"tipo":"reporte"}]
+[ACCION:{"tipo":"guardar_plantilla","nombre":"nombre_corto","caption":"..."}]
+
+━━━━━━━━━━━━━━━━━━━━━━
+REGLAS CRÍTICAS
+━━━━━━━━━━━━━━━━━━━━━━
+✅ "hazme una imagen de X" → SIEMPRE es generar_imagen, nunca pidas que el admin mande la imagen
+✅ Solo pon [ACCION] cuando el admin haya APROBADO explícitamente
+✅ Cuando generes una imagen con IA, DESPUÉS de mostrarla pregunta: "¿dónde la mandamos? ¿grupos, estado o ambos?"
+✅ Para promos, siempre propón el texto del caption antes de ejecutar
+✅ Si el admin dice algo ambiguo, PREGUNTA en lugar de asumir
+✅ Recuerda las promos pasadas para no repetirlas
+✅ Sugiere horarios pico: 9am, 12pm, 6pm, 8pm
+✅ El caption para WhatsApp debe ser atractivo, con emojis, precio visible y llamada a acción
+❌ NUNCA ejecutes sin aprobación
+❌ NUNCA pongas [ACCION] si falta información (imagen, destino, texto)
+❌ Si el admin pide una imagen generada por IA, NO le pidas que adjunte una imagen manualmente`;
 
 // ── Llamar al agente ────────────────────────────────────────
 async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones) {
@@ -162,23 +211,36 @@ async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones) {
 
   const memoriaCtx = buildContextoMemoria();
 
-  adminChat.push({
-    role: 'user',
-    content: `${mensajeAdmin}${tieneImagen ? '\n[El admin adjuntó una imagen]' : ''}`
-  });
-  if (adminChat.length > 24) adminChat.splice(0, adminChat.length - 24);
+  // Construir el mensaje del usuario con contexto de imagen
+  let msgUser = mensajeAdmin;
+  if (tieneImagen && mensajeAdmin && mensajeAdmin !== '[imagen sin texto]') {
+    msgUser = `${mensajeAdmin}\n[El admin adjuntó una imagen junto con este mensaje]`;
+  } else if (tieneImagen) {
+    msgUser = '[El admin mandó una imagen sin texto]';
+  }
+
+  adminChat.push({ role: 'user', content: msgUser });
+  // Mantener solo los últimos 20 mensajes (10 turnos)
+  if (adminChat.length > 20) adminChat.splice(0, adminChat.length - 20);
 
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_KEY}` },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        max_tokens: 700,
+        model: 'gpt-4o',           // gpt-4o entiende mucho mejor las intenciones
+        max_tokens: 800,
+        temperature: 0.7,
         messages: [
           {
             role: 'system',
-            content: `${MARKETING_SYSTEM}\n\n--- Estado de sesiones ---\n${contextoSesiones}\n\n--- Memoria y historial ---\n${memoriaCtx}`
+            content: [
+              MARKETING_SYSTEM,
+              '\n\n━━━ ESTADO DE SESIONES ━━━',
+              contextoSesiones,
+              '\n━━━ MEMORIA Y PROMOS PASADAS ━━━',
+              memoriaCtx
+            ].join('\n')
           },
           ...adminChat
         ]
@@ -186,26 +248,43 @@ async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones) {
     });
 
     const data = await res.json();
+
+    if (data.error) {
+      console.error('[AGENTE] OpenAI error:', data.error);
+      adminChat.pop();
+      return { respuesta: `❌ Error OpenAI: ${data.error.message}`, accion: null };
+    }
+
     const texto = data.choices?.[0]?.message?.content?.trim() || '';
     adminChat.push({ role: 'assistant', content: texto });
 
-    // Extraer [ACCION:{...}]
+    // Extraer [ACCION:{...}] — soporta saltos de línea dentro del JSON
     const match = texto.match(/\[ACCION:(\{[\s\S]*?\})\]/);
     let accion = null;
     let respuesta = texto.replace(/\[ACCION:[\s\S]*?\]/, '').trim();
 
     if (match) {
-      try { accion = JSON.parse(match[1]); } catch(e) {
-        console.error('[AGENTE] Error parseando accion:', e.message);
+      try {
+        accion = JSON.parse(match[1]);
+        console.log('[AGENTE] Acción detectada:', accion.tipo);
+      } catch(e) {
+        console.error('[AGENTE] Error parseando accion JSON:', e.message, '→', match[1]);
+        // Intentar limpiar y re-parsear
+        try {
+          const cleaned = match[1].replace(/[\r\n\t]/g, ' ').replace(/\s+/g, ' ');
+          accion = JSON.parse(cleaned);
+        } catch(e2) {
+          console.error('[AGENTE] No se pudo parsear ni limpiando:', e2.message);
+        }
       }
     }
 
     return { respuesta, accion };
 
   } catch(e) {
-    console.error('[AGENTE] Error:', e.message);
+    console.error('[AGENTE] Error de red:', e.message);
     adminChat.pop();
-    return { respuesta: '❌ Error con IA. Intenta de nuevo.', accion: null };
+    return { respuesta: '❌ Error de conexión con IA. Intenta de nuevo.', accion: null };
   }
 }
 
@@ -270,21 +349,34 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     await replyFn('🎨 Generando imagen con IA, espera unos segundos...');
     try {
       const buf = await generarImagenDalle(accion.prompt);
-      // Guardar pending para que el admin la apruebe y la use
-      adminPending.accion = { tipo: 'grupos', caption: accion.caption || '' };
+      // Guardar imagen en pending pero SIN acción predefinida — preguntamos al admin
       adminPending.imgBuffer = buf;
+      adminPending.accion = {
+        tipo: 'esperar_destino',
+        caption: accion.caption || '',
+        prompt: accion.prompt,
+      };
       // Enviar la imagen generada al admin para revisión
       const s = sesiones[sesionId];
       if (s?.sock) {
         await s.sock.sendMessage(
           CMD_PHONE.replace(/\D/g,'') + '@s.whatsapp.net',
-          { image: buf, caption: '👆 Imagen generada. Di *"grupos"*, *"estado"* o *"ambos"* para publicarla.\nO di *"no"* para descartarla.' }
+          {
+            image: buf,
+            caption: '👆 Aquí está la imagen generada.\n\n¿Dónde la publicamos?\n\n📤 *grupos* — la mando a todos los grupos\n📸 *estado* — la subo como story\n🔄 *ambos* — grupos y estado\n❌ *no* — descárgala pero no publiques'
+          }
         );
       }
-      return ''; // Ya envió la imagen directamente
+      return '';
     } catch(e) {
       return '❌ Error generando imagen: ' + e.message;
     }
+  }
+
+  // ESPERAR DESTINO (después de generar imagen, el admin dice dónde mandar)
+  if (accion.tipo === 'esperar_destino') {
+    // Este tipo no debería llegar aquí directamente, se maneja en el bloque admin
+    return '⚠️ Error interno: estado esperar_destino inesperado.';
   }
 
   // PROGRAMAR ENVÍO ÚNICO
@@ -678,7 +770,7 @@ async function conectarSesion(sesionId) {
         };
 
         // Si llegó imagen sin texto y hay una acción pendiente, ejecutar directo
-        if (imgBuffer && !texto && adminPending.accion) {
+        if (imgBuffer && !texto && adminPending.accion && adminPending.accion.tipo !== 'esperar_destino') {
           const accionGuardada = adminPending.accion;
           adminPending.accion = null;
           adminPending.imgBuffer = imgBuffer; // guardar para schedules
@@ -688,8 +780,78 @@ async function conectarSesion(sesionId) {
           continue;
         }
 
+        // Si hay imagen pendiente esperando destino y el admin dice dónde mandar
+        if (adminPending.accion?.tipo === 'esperar_destino' && adminPending.imgBuffer) {
+          const textoLower = texto.toLowerCase().trim();
+          let destinoElegido = null;
+
+          if (/^(grupos?|grupo|mándalo|mandalo|envía|envia|envíalo|envialo)/.test(textoLower)) {
+            destinoElegido = 'grupos';
+          } else if (/^(estado|story|stories|súbelo|subelo)/.test(textoLower)) {
+            destinoElegido = 'estado';
+          } else if (/^(ambos|todo|grupos? y estado|los dos)/.test(textoLower)) {
+            destinoElegido = 'ambos';
+          } else if (/^(no|cancela|descartar|borrar|olvídalo|olvidalo)/.test(textoLower)) {
+            adminPending.accion = null;
+            await reply('🗑️ Ok, descartada. La imagen queda guardada por si la necesitas después.\n\n¿Qué más necesitas?');
+            continue;
+          }
+
+          if (destinoElegido) {
+            const caption = adminPending.accion.caption || '';
+            const accionFinal = { tipo: destinoElegido, caption };
+            adminPending.accion = null;
+            await reply(`📤 Perfecto, enviando a *${destinoElegido}*...`);
+            const resultado = await ejecutarAccion(accionFinal, adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply);
+            if (resultado) await reply(resultado);
+            continue;
+          }
+          // Si no reconoció el destino, dejar que el agente responda normalmente
+        }
+
         // Guardar última imagen para que los schedules puedan usarla
         if (imgBuffer) adminPending.imgBuffer = imgBuffer;
+
+        // ── Comandos directos (sin IA) ──────────────────────
+        const textoCmds = texto.toLowerCase().trim();
+        if (textoCmds === '!reset' || textoCmds === 'reset' || textoCmds === '!reiniciar') {
+          adminChat.length = 0;
+          adminPending.accion = null;
+          await reply('🔄 Historial de conversación limpiado. ¡Empezamos de cero!\n\nPuedes decirme:\n• "hazme una imagen de Disney+ a $35"\n• "manda una promo a los grupos"\n• "dame el reporte"\n• "programa una promo diaria a las 9am"');
+          continue;
+        }
+        if (textoCmds === '!ayuda' || textoCmds === '!help' || textoCmds === 'ayuda') {
+          await reply(
+            '🤖 *Agente de Marketing SOS Digital*\n\n' +
+            '📌 *Ejemplos de lo que puedes pedirme:*\n\n' +
+            '🎨 "hazme una imagen de Disney+ a $35"\n' +
+            '🎨 "crea un diseño para promo de Netflix"\n' +
+            '📤 "manda esta promo a los grupos"\n' +
+            '📸 "súbelo como estado/story"\n' +
+            '🔄 "mándalo a grupos y estado"\n' +
+            '⏰ "programa esto para las 6pm todos los días"\n' +
+            '⏰ "mándalo en 30 minutos"\n' +
+            '📊 "dame el reporte de sesiones"\n' +
+            '💾 "guarda esta plantilla como promo_netflix"\n\n' +
+            '🔄 Escribe *!reset* si el bot se confunde\n' +
+            '📋 Escribe *!estado* para ver programaciones activas'
+          );
+          continue;
+        }
+        if (textoCmds === '!estado' || textoCmds === '!schedules') {
+          const schedules = cargarSchedules();
+          if (!schedules.length) {
+            await reply('⏰ No hay programaciones activas.');
+          } else {
+            const lines = ['⏰ *Programaciones activas:*\n'];
+            schedules.forEach(s => {
+              lines.push(`• [${s.id}]\n  📌 ${s.descripcion}\n  🕐 ${s.recurrente ? 'Diario a las '+s.hora : 'Una vez en '+s.minutos+' min'}\n  📤 Destino: ${s.destino}`);
+            });
+            lines.push('\nPara cancelar di: _"cancela [ID]"_');
+            await reply(lines.join('\n'));
+          }
+          continue;
+        }
 
         // Construir contexto de sesiones para el agente
         const ctxSesiones = SESIONES_ACTIVAS.map(id => {
