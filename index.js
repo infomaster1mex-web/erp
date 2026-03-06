@@ -331,6 +331,27 @@ async function conectarSesion(sesionId) {
         const jid = msg.key.remoteJid;
         if (!jid || jid.includes('@g.us') || jid.includes('status@')) continue;
 
+        // Si es el administrador → enviar menú de comandos (no auto-reply)
+        const cmdJid = CMD_PHONE ? CMD_PHONE.replace(/\D/g,'') + '@s.whatsapp.net' : null;
+        if (cmdJid && jid === cmdJid) {
+          try {
+            await s.sock.sendMessage(jid, { text:
+              '🤖 *Panel de Control — SOS Digital*\n\n' +
+              '📸 *!estado* + imagen\n' +
+              '   Publica la imagen en los estados de todas las sesiones activas\n\n' +
+              '👥 *!grupos* + imagen\n' +
+              '   Envía la imagen a todos los grupos (puedes agregar texto después del comando)\n\n' +
+              '📊 *!reporte*\n' +
+              '   Ver estado de sesiones y contactos en caché\n\n' +
+              '❓ *!ayuda*\n' +
+              '   Volver a mostrar este menú\n\n' +
+              '_Ejemplo: escribe_ *!grupos* _y adjunta la imagen del promo_'
+            });
+            console.log(`[${sesionId}] Menú enviado → admin`);
+          } catch(e) {}
+          continue;
+        }
+
         // Solo responder una vez por hora al mismo número
         const cacheKey = `${sesionId}:${jid}`;
         if (!global._autoReplyCache) global._autoReplyCache = {};
