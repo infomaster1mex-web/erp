@@ -20,10 +20,75 @@ const __dirname  = path.dirname(__filename);
 
 const app     = express();
 const PORT    = process.env.PORT || 3000;
-const API_KEY = process.env.SOS_API_KEY || 'sos_digital_secret_2025';
-const ADMIN_PHONE = process.env.ADMIN_PHONE || '';  // Tu WhatsApp personal (ej: 524491234567)
-const CMD_PHONE    = process.env.CMD_PHONE    || ADMIN_PHONE; // Número que da órdenes al bot
-const CMD_SESION  = process.env.CMD_SESION  || 'grupos'; // Sesión que recibe tus comandos
+const API_KEY     = process.env.SOS_API_KEY    || 'sos_digital_secret_2025';
+const OPENAI_KEY  = process.env.OPENAI_API_KEY || '';
+const ADMIN_PHONE = process.env.ADMIN_PHONE    || '';
+const CMD_PHONE   = process.env.CMD_PHONE      || ADMIN_PHONE;
+const CMD_SESION  = process.env.CMD_SESION     || 'grupos';
+
+// ── Intérprete IA de comandos ──────────────────────────────────
+// Convierte lenguaje natural en acción estructurada
+// Devuelve: { accion: 'grupos'|'estado'|'reporte'|'ayuda', caption: string }
+async function interpretarComando(texto, tieneImagen) {
+  if (!OPENAI_KEY) {
+    // Sin IA: detectar por palabras clave básicas
+    const t = texto.toLowerCase();
+    if (tieneImagen && (t.includes('grupo') || t.includes('promo') || t.includes('manda') || t.includes('envia') || t.includes('publica'))) return { accion: 'grupos', caption: texto };
+    if (tieneImagen && (t.includes('estado') || t.includes('story') || t.includes('historia'))) return { accion: 'estado', caption: texto };
+    if (t.includes('reporte') || t.includes('estado de') || t.includes('sesion')) return { accion: 'reporte', caption: '' };
+    return { accion: 'ayuda', caption: '' };
+  }
+
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        max_tokens: 150,
+        messages: [{
+          role: 'system',
+          content: `Eres el intérprete de comandos de un bot de WhatsApp para SOS Digital.
+El admin te manda instrucciones en lenguaje natural. Tu trabajo es detectar QUÉ quiere hacer y extraer el caption/texto si aplica.
+Responde ÚNICAMENTE con JSON válido, sin markdown, sin explicaciones.
+
+Acciones posibles:
+- "grupos": enviar imagen+texto a todos los grupos de WhatsApp (requiere imagen adjunta)
+- "estado": publicar imagen como estado/story de WhatsApp (requiere imagen adjunta)  
+- "reporte": ver el estado de las sesiones conectadas
+- "ayuda": mostrar el menú de comandos
+
+Formato de respuesta:
+{"accion":"grupos","caption":"texto que va con la imagen o vacío"}
+
+Reglas:
+- Si menciona grupos, publicar en grupos, mandar promo → "grupos"
+- Si menciona estado, story, historia, stories → "estado"
+- Si menciona reporte, sesiones, estado de los bots → "reporte"
+- El "caption" es el texto promocional que acompañará la imagen (extráelo o genera uno corto si el admin describió la promo)
+- Si tiene imagen adjunta y menciona algo de publicar/enviar/mandar → default "grupos"`
+        }, {
+          role: 'user',
+          content: `Mensaje del admin: "${texto}"\nTiene imagen adjunta: ${tieneImagen}`
+        }]
+      })
+    });
+
+    const data = await res.json();
+    const raw  = data.choices?.[0]?.message?.content?.trim() || '{}';
+    const parsed = JSON.parse(raw);
+    return {
+      accion:  parsed.accion  || (tieneImagen ? 'grupos' : 'ayuda'),
+      caption: parsed.caption || '',
+    };
+  } catch(e) {
+    console.error('[IA] Error interpretando comando:', e.message);
+    return { accion: tieneImagen ? 'grupos' : 'ayuda', caption: texto };
+  }
+}
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -215,17 +280,19 @@ async function conectarSesion(sesionId) {
           }
         }
 
-        const cmd = texto.toLowerCase().split(' ')[0] || '!ayuda';
-        const args = texto.slice(cmd.length).trim();
-        console.log(`[CMD] "${cmd}" args="${args}" imagen=${!!imgBuffer}`);
+        console.log(`[CMD] Interpretando: "${texto}" imagen=${!!imgBuffer}`);
 
         const reply = async (txt) => {
           try { await s.sock.sendMessage(fromJid, { text: txt }); } catch(e) {}
         };
 
-        // !estado
-        if (cmd === '!estado') {
-          if (!imgBuffer) { await reply('❌ Adjunta una imagen para publicar como estado.'); continue; }
+        // Interpretar con IA (o fallback por palabras clave)
+        const { accion, caption } = await interpretarComando(texto, !!imgBuffer);
+        console.log(`[CMD] IA → accion="${accion}" caption="${caption}"`);
+
+        // ── ACCION: estado ──────────────────────────────────────
+        if (accion === 'estado') {
+          if (!imgBuffer) { await reply('📎 Entendido, quieres publicar un estado.\n\nAdjunta la imagen junto con el mensaje.'); continue; }
           const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo);
           if (!targets.length) { await reply('❌ No hay sesiones conectadas.'); continue; }
           await reply(`⏳ Publicando estado en ${targets.length} sesión(es)...`);
@@ -241,19 +308,19 @@ async function conectarSesion(sesionId) {
               await ss.sock.sendMessage('status@broadcast', {
                 image: imgBuffer,
                 mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-                ...(args ? { caption: args } : {})
+                ...(caption ? { caption } : {})
               }, { statusJidList });
               ok++;
               await new Promise(r => setTimeout(r, 1500));
             } catch(e) { fail++; console.error(`[CMD] Error estado ${sid}:`, e.message); }
           }
-          await reply(`✅ Estado publicado: ${ok} sesión(es) OK, ${fail} fallidas.`);
+          await reply(`✅ *Estado publicado:* ${ok} sesión(es) OK, ${fail} fallidas.`);
           continue;
         }
 
-        // !grupos
-        if (cmd === '!grupos') {
-          if (!imgBuffer) { await reply('❌ Adjunta una imagen para enviar a los grupos.'); continue; }
+        // ── ACCION: grupos ──────────────────────────────────────
+        if (accion === 'grupos') {
+          if (!imgBuffer) { await reply('📎 Entendido, quieres publicar en grupos.\n\nAdjunta la imagen de la promo y manda el mensaje junto con ella.'); continue; }
           const sg = sesiones['grupos'] || sesiones[sesionId];
           if (!sg?.listo) { await reply('❌ La sesión "grupos" no está conectada.'); continue; }
           await reply('⏳ Obteniendo lista de grupos...');
@@ -269,21 +336,21 @@ async function conectarSesion(sesionId) {
                 await sg.sock.sendMessage(gid, {
                   image: imgBuffer,
                   mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-                  ...(args ? { caption: args } : {})
+                  ...(caption ? { caption } : {})
                 });
                 ok++;
                 await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
               } catch(e) { fail++; }
             }
-            await reply(`✅ Grupos: ${ok} OK, ${fail} fallidos de ${gids.length} totales.`);
+            await reply(`✅ *Listo.* ${ok} grupos OK, ${fail} fallidos de ${gids.length} totales.`);
           } catch(e) {
             await reply('❌ Error obteniendo grupos: ' + e.message);
           }
           continue;
         }
 
-        // !reporte
-        if (cmd === '!reporte' || cmd === '!r') {
+        // ── ACCION: reporte ─────────────────────────────────────
+        if (accion === 'reporte') {
           const lines = ['📊 *Reporte SOS Digital*\n'];
           for (const [id, ss] of Object.entries(sesiones)) {
             const ico = ss.listo ? '🟢' : '🔴';
@@ -294,18 +361,14 @@ async function conectarSesion(sesionId) {
           continue;
         }
 
-        // !ayuda o cualquier otro mensaje sin comando reconocido
+        // ── ACCION: ayuda (default) ─────────────────────────────
         await reply(
           '🤖 *Panel de Control — SOS Digital*\n\n' +
-          '📸 *!estado* + imagen\n' +
-          '   Publica la imagen en los estados de todas las sesiones activas\n\n' +
-          '👥 *!grupos* + imagen\n' +
-          '   Envía la imagen a todos los grupos\n\n' +
-          '📊 *!reporte*\n' +
-          '   Ver estado de sesiones y contactos\n\n' +
-          '❓ *!ayuda*\n' +
-          '   Mostrar este menú\n\n' +
-          '_Ejemplo: escribe_ *!grupos* _y adjunta la imagen del promo_'
+          'Escríbeme en lenguaje natural, por ejemplo:\n\n' +
+          '📸 _"Sube este estado"_ + imagen\n' +
+          '👥 _"Manda esta promo a los grupos"_ + imagen\n' +
+          '📊 _"Dame el reporte de sesiones"_\n\n' +
+          'O comandos directos: *!estado* *!grupos* *!reporte*'
         );
         continue;
       }
