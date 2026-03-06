@@ -26,69 +26,462 @@ const ADMIN_PHONE = process.env.ADMIN_PHONE    || '';
 const CMD_PHONE   = process.env.CMD_PHONE      || ADMIN_PHONE;
 const CMD_SESION  = process.env.CMD_SESION     || 'grupos';
 
-// ── Intérprete IA de comandos ──────────────────────────────────
-// Convierte lenguaje natural en acción estructurada
-// Devuelve: { accion: 'grupos'|'estado'|'reporte'|'ayuda', caption: string }
-async function interpretarComando(texto, tieneImagen) {
-  if (!OPENAI_KEY) {
-    // Sin IA: detectar por palabras clave básicas
-    const t = texto.toLowerCase();
-    if (tieneImagen && (t.includes('grupo') || t.includes('promo') || t.includes('manda') || t.includes('envia') || t.includes('publica'))) return { accion: 'grupos', caption: texto };
-    if (tieneImagen && (t.includes('estado') || t.includes('story') || t.includes('historia'))) return { accion: 'estado', caption: texto };
-    if (t.includes('reporte') || t.includes('estado de') || t.includes('sesion')) return { accion: 'reporte', caption: '' };
-    return { accion: 'ayuda', caption: '' };
+// ═══════════════════════════════════════════════════════════════
+//  AGENTE DE MARKETING IA — Memoria persistente + Programación
+// ═══════════════════════════════════════════════════════════════
+
+const MEMORIA_FILE   = path.join(__dirname, 'auth_info', 'marketing_memoria.json');
+const SCHEDULES_FILE = path.join(__dirname, 'auth_info', 'marketing_schedules.json');
+
+// ── Memoria persistente ─────────────────────────────────────
+// Guarda: historial de promos enviadas, plantillas, notas
+function cargarMemoria() {
+  try {
+    if (fs.existsSync(MEMORIA_FILE)) return JSON.parse(fs.readFileSync(MEMORIA_FILE, 'utf8'));
+  } catch(e) {}
+  return { promos: [], plantillas: [], notas: [] };
+}
+
+function guardarMemoria(mem) {
+  try {
+    fs.mkdirSync(path.dirname(MEMORIA_FILE), { recursive: true });
+    fs.writeFileSync(MEMORIA_FILE, JSON.stringify(mem, null, 2));
+  } catch(e) { console.error('[MEM] Error guardando:', e.message); }
+}
+
+function registrarPromoEnviada(caption, destino, grupos = 0) {
+  const mem = cargarMemoria();
+  mem.promos.push({
+    fecha: new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' }),
+    caption: caption.slice(0, 200),
+    destino,
+    grupos,
+  });
+  if (mem.promos.length > 100) mem.promos = mem.promos.slice(-100);
+  guardarMemoria(mem);
+}
+
+function guardarPlantilla(nombre, caption) {
+  const mem = cargarMemoria();
+  const idx = mem.plantillas.findIndex(p => p.nombre === nombre);
+  if (idx >= 0) mem.plantillas[idx] = { nombre, caption };
+  else mem.plantillas.push({ nombre, caption });
+  guardarMemoria(mem);
+}
+
+// ── Schedules persistentes ──────────────────────────────────
+function cargarSchedules() {
+  try {
+    if (fs.existsSync(SCHEDULES_FILE)) return JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8'));
+  } catch(e) {}
+  return [];
+}
+
+function guardarSchedules(schedules) {
+  try {
+    fs.mkdirSync(path.dirname(SCHEDULES_FILE), { recursive: true });
+    fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(schedules, null, 2));
+  } catch(e) {}
+}
+
+// Map de timers activos para poder cancelarlos
+const timersActivos = new Map();
+
+// ── Historial de conversación ───────────────────────────────
+const adminChat = [];
+
+// Estado de ejecución pendiente
+const adminPending = {
+  accion: null,
+  imgBuffer: null,
+};
+
+// ── Contexto de memoria para el agente ─────────────────────
+function buildContextoMemoria() {
+  const mem = cargarMemoria();
+  const schedules = cargarSchedules();
+  const lines = [];
+
+  if (mem.promos.length > 0) {
+    lines.push('📋 Últimas promos enviadas:');
+    mem.promos.slice(-5).forEach(p =>
+      lines.push(`  • [${p.fecha}] ${p.destino} — "${p.caption.slice(0,60)}..."`)
+    );
   }
+  if (mem.plantillas.length > 0) {
+    lines.push('\n📁 Plantillas guardadas: ' + mem.plantillas.map(p => p.nombre).join(', '));
+  }
+  if (schedules.length > 0) {
+    lines.push('\n⏰ Programaciones activas:');
+    schedules.forEach(s =>
+      lines.push(`  • [${s.id}] ${s.tipo} — ${s.descripcion} — ${s.recurrente ? 'diario a las '+s.hora : 'una vez en '+s.minutos+'min'}`)
+    );
+  }
+  if (mem.notas.length > 0) {
+    lines.push('\n📝 Notas: ' + mem.notas.slice(-3).join(' | '));
+  }
+
+  return lines.length ? lines.join('\n') : 'Sin historial aún.';
+}
+
+// ── System prompt completo ──────────────────────────────────
+const MARKETING_SYSTEM = `Eres el *Agente de Marketing de SOS Digital / Infomaster*, una empresa mexicana que revende servicios digitales.
+
+Servicios: Netflix, Disney+, Max, Prime Video, Paramount+, ViX, Apple TV+, Spotify, YouTube Music, Microsoft 365, Canva Pro, YouTube Premium, Universal+, Crunchyroll.
+
+PERSONALIDAD: Eres proactivo, creativo, hablas en español mexicano informal. Eres como el cuate de marketing que siempre tiene ideas. Propones, sugieres, recuerdas lo que se hizo antes y ayudas a no repetir promos.
+
+CAPACIDADES (usa [ACCION:{...}] al final cuando el admin apruebe):
+1. Generar y enviar promo a grupos:       [ACCION:{"tipo":"grupos","caption":"..."}]
+2. Publicar como estado/story:            [ACCION:{"tipo":"estado","caption":"..."}]
+3. Enviar a grupos Y estado al mismo tiempo: [ACCION:{"tipo":"ambos","caption":"..."}]
+4. Generar imagen con IA (DALL-E):        [ACCION:{"tipo":"generar_imagen","prompt":"descripción visual detallada en inglés"}]
+5. Programar envío único (X minutos):     [ACCION:{"tipo":"programar","minutos":30,"destino":"grupos","caption":"...","descripcion":"promo Disney+"}]
+6. Programar envío DIARIO (hora fija):    [ACCION:{"tipo":"programar_diario","hora":"09:00","destino":"grupos","caption":"...","descripcion":"recordatorio diario"}]
+7. Cancelar una programación:             [ACCION:{"tipo":"cancelar_schedule","id":"schedule_id"}]
+8. Ver reporte de sesiones:               [ACCION:{"tipo":"reporte"}]
+9. Guardar plantilla para reusar:         [ACCION:{"tipo":"guardar_plantilla","nombre":"nombre_corto","caption":"..."}]
+
+REGLAS:
+- Cuando describes lo que harás, siempre menciona el texto promo que generaste para que el admin lo vea y apruebe
+- Si el admin dice "sí/dale/va/ok/mándalo/aprobado/listo/adelante" → ejecuta con [ACCION]
+- Si dice "no/cancela/mejor no/cambia" → pregunta qué modificar
+- Si pide una imagen, genera el prompt de DALL-E descriptivo y usa generar_imagen
+- Recuerda siempre lo que se ha enviado para sugerir variedad
+- Para programaciones diarias sugiere horarios pico: 9am, 12pm, 6pm, 8pm
+- Sugiere proactivamente: "¿quieres que esto lo programe para todos los días?"
+- El [ACCION] va al FINAL del mensaje, después de tu respuesta conversacional
+- NUNCA incluyas [ACCION] si el admin no ha aprobado todavía
+- Si necesitas imagen del admin y no la tienes, NO incluyas [ACCION]`;
+
+// ── Llamar al agente ────────────────────────────────────────
+async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones) {
+  if (!OPENAI_KEY) {
+    return { respuesta: '⚙️ Falta OPENAI_API_KEY en las variables de Railway.', accion: null };
+  }
+
+  const memoriaCtx = buildContextoMemoria();
+
+  adminChat.push({
+    role: 'user',
+    content: `${mensajeAdmin}${tieneImagen ? '\n[El admin adjuntó una imagen]' : ''}`
+  });
+  if (adminChat.length > 24) adminChat.splice(0, adminChat.length - 24);
 
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENAI_KEY}`,
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_KEY}` },
       body: JSON.stringify({
         model: 'gpt-4o-mini',
-        max_tokens: 150,
-        messages: [{
-          role: 'system',
-          content: `Eres el intérprete de comandos de un bot de WhatsApp para SOS Digital.
-El admin te manda instrucciones en lenguaje natural. Tu trabajo es detectar QUÉ quiere hacer y extraer el caption/texto si aplica.
-Responde ÚNICAMENTE con JSON válido, sin markdown, sin explicaciones.
-
-Acciones posibles:
-- "grupos": enviar imagen+texto a todos los grupos de WhatsApp (requiere imagen adjunta)
-- "estado": publicar imagen como estado/story de WhatsApp (requiere imagen adjunta)  
-- "reporte": ver el estado de las sesiones conectadas
-- "ayuda": mostrar el menú de comandos
-
-Formato de respuesta:
-{"accion":"grupos","caption":"texto que va con la imagen o vacío"}
-
-Reglas:
-- Si menciona grupos, publicar en grupos, mandar promo → "grupos"
-- Si menciona estado, story, historia, stories → "estado"
-- Si menciona reporte, sesiones, estado de los bots → "reporte"
-- El "caption" es el texto promocional que acompañará la imagen (extráelo o genera uno corto si el admin describió la promo)
-- Si tiene imagen adjunta y menciona algo de publicar/enviar/mandar → default "grupos"`
-        }, {
-          role: 'user',
-          content: `Mensaje del admin: "${texto}"\nTiene imagen adjunta: ${tieneImagen}`
-        }]
+        max_tokens: 700,
+        messages: [
+          {
+            role: 'system',
+            content: `${MARKETING_SYSTEM}\n\n--- Estado de sesiones ---\n${contextoSesiones}\n\n--- Memoria y historial ---\n${memoriaCtx}`
+          },
+          ...adminChat
+        ]
       })
     });
 
     const data = await res.json();
-    const raw  = data.choices?.[0]?.message?.content?.trim() || '{}';
-    const parsed = JSON.parse(raw);
-    return {
-      accion:  parsed.accion  || (tieneImagen ? 'grupos' : 'ayuda'),
-      caption: parsed.caption || '',
-    };
+    const texto = data.choices?.[0]?.message?.content?.trim() || '';
+    adminChat.push({ role: 'assistant', content: texto });
+
+    // Extraer [ACCION:{...}]
+    const match = texto.match(/\[ACCION:(\{[\s\S]*?\})\]/);
+    let accion = null;
+    let respuesta = texto.replace(/\[ACCION:[\s\S]*?\]/, '').trim();
+
+    if (match) {
+      try { accion = JSON.parse(match[1]); } catch(e) {
+        console.error('[AGENTE] Error parseando accion:', e.message);
+      }
+    }
+
+    return { respuesta, accion };
+
   } catch(e) {
-    console.error('[IA] Error interpretando comando:', e.message);
-    return { accion: tieneImagen ? 'grupos' : 'ayuda', caption: texto };
+    console.error('[AGENTE] Error:', e.message);
+    adminChat.pop();
+    return { respuesta: '❌ Error con IA. Intenta de nuevo.', accion: null };
   }
 }
+
+// ── Generar imagen con DALL-E 3 ────────────────────────────
+async function generarImagenDalle(prompt) {
+  const res = await fetch('https://api.openai.com/v1/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_KEY}` },
+    body: JSON.stringify({
+      model: 'dall-e-3',
+      prompt: `Marketing promotional image for WhatsApp. Mexican streaming service reseller. ${prompt}. Bold text, vibrant colors, professional design, 1024x1024.`,
+      n: 1,
+      size: '1024x1024',
+      response_format: 'b64_json',
+    })
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  const b64 = data.data?.[0]?.b64_json;
+  if (!b64) throw new Error('Sin imagen en respuesta');
+  return Buffer.from(b64, 'base64');
+}
+
+// ── Ejecutar acción ─────────────────────────────────────────
+async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn) {
+
+  // REPORTE
+  if (accion.tipo === 'reporte') {
+    const lines = ['📊 *Reporte SOS Digital*\n'];
+    for (const [id, ss] of Object.entries(sesiones)) {
+      const ico = ss.listo ? '🟢' : '🔴';
+      lines.push(`${ico} *${id}* — ${ss.listo ? '+'+ss.numero : 'Offline'} (${ss.contactos?.size||0} contactos)`);
+    }
+    const schedules = cargarSchedules();
+    if (schedules.length) {
+      lines.push('\n⏰ *Programaciones activas:*');
+      schedules.forEach(s => lines.push(`  • [${s.id}] ${s.descripcion}`));
+    }
+    return lines.join('\n');
+  }
+
+  // GUARDAR PLANTILLA
+  if (accion.tipo === 'guardar_plantilla') {
+    guardarPlantilla(accion.nombre, accion.caption);
+    return `📁 Plantilla "${accion.nombre}" guardada.`;
+  }
+
+  // CANCELAR SCHEDULE
+  if (accion.tipo === 'cancelar_schedule') {
+    const schedules = cargarSchedules().filter(s => s.id !== accion.id);
+    guardarSchedules(schedules);
+    if (timersActivos.has(accion.id)) {
+      clearInterval(timersActivos.get(accion.id));
+      clearTimeout(timersActivos.get(accion.id));
+      timersActivos.delete(accion.id);
+    }
+    return `✅ Programación "${accion.id}" cancelada.`;
+  }
+
+  // GENERAR IMAGEN CON DALL-E
+  if (accion.tipo === 'generar_imagen') {
+    await replyFn('🎨 Generando imagen con IA, espera unos segundos...');
+    try {
+      const buf = await generarImagenDalle(accion.prompt);
+      // Guardar pending para que el admin la apruebe y la use
+      adminPending.accion = { tipo: 'grupos', caption: accion.caption || '' };
+      adminPending.imgBuffer = buf;
+      // Enviar la imagen generada al admin para revisión
+      const s = sesiones[sesionId];
+      if (s?.sock) {
+        await s.sock.sendMessage(
+          CMD_PHONE.replace(/\D/g,'') + '@s.whatsapp.net',
+          { image: buf, caption: '👆 Imagen generada. Di *"grupos"*, *"estado"* o *"ambos"* para publicarla.\nO di *"no"* para descartarla.' }
+        );
+      }
+      return ''; // Ya envió la imagen directamente
+    } catch(e) {
+      return '❌ Error generando imagen: ' + e.message;
+    }
+  }
+
+  // PROGRAMAR ENVÍO ÚNICO
+  if (accion.tipo === 'programar') {
+    const id = 'sch_' + Date.now();
+    const minutos = accion.minutos || 5;
+    const schedules = cargarSchedules();
+    schedules.push({
+      id, tipo: 'unico', destino: accion.destino || 'grupos',
+      caption: accion.caption || '', descripcion: accion.descripcion || 'Envío programado',
+      minutos, recurrente: false,
+      hora: null, creadoEn: new Date().toISOString(),
+    });
+    guardarSchedules(schedules);
+
+    const timer = setTimeout(async () => {
+      console.log(`[SCHEDULE] Ejecutando ${id}...`);
+      const resultado = await ejecutarAccion(
+        { tipo: accion.destino || 'grupos', caption: accion.caption },
+        imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn
+      );
+      await replyFn(`⏰ *Envío programado ejecutado:*\n${resultado}`);
+      // Eliminar de schedules
+      const updated = cargarSchedules().filter(s => s.id !== id);
+      guardarSchedules(updated);
+      timersActivos.delete(id);
+    }, minutos * 60 * 1000);
+
+    timersActivos.set(id, timer);
+    await replyFn(`⏰ Programado en *${minutos} minutos* (ID: ${id})\nPara cancelar di: _"cancela ${id}"_`);
+    return '';
+  }
+
+  // PROGRAMAR DIARIO (hora fija)
+  if (accion.tipo === 'programar_diario') {
+    const id = 'dia_' + Date.now();
+    const hora = accion.hora || '09:00';
+    const [hh, mm] = hora.split(':').map(Number);
+    const schedules = cargarSchedules();
+    schedules.push({
+      id, tipo: 'diario', destino: accion.destino || 'grupos',
+      caption: accion.caption || '', descripcion: accion.descripcion || 'Envío diario',
+      hora, recurrente: true, creadoEn: new Date().toISOString(),
+    });
+    guardarSchedules(schedules);
+
+    // Calcular ms hasta la próxima ejecución
+    const ahora = new Date();
+    const tz = 'America/Mexico_City';
+    const ahoraLocal = new Date(ahora.toLocaleString('en-US', { timeZone: tz }));
+    let proxima = new Date(ahoraLocal);
+    proxima.setHours(hh, mm, 0, 0);
+    if (proxima <= ahoraLocal) proxima.setDate(proxima.getDate() + 1);
+    const msHastaInicio = proxima - ahoraLocal;
+
+    const arrancarDiario = () => {
+      const interval = setInterval(async () => {
+        const sc = cargarSchedules().find(s => s.id === id);
+        if (!sc) { clearInterval(interval); timersActivos.delete(id); return; }
+        console.log(`[SCHEDULE DIARIO] Ejecutando ${id}...`);
+        const resultado = await ejecutarAccion(
+          { tipo: sc.destino, caption: sc.caption },
+          adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn
+        );
+        if (resultado) await replyFn(`⏰ *Envío diario ejecutado (${hora}):*\n${resultado}`);
+        else await replyFn(`⏰ *Envío diario (${hora}):* Necesito imagen actualizada. Mándala y dime qué hacer.`);
+      }, 24 * 60 * 60 * 1000);
+      timersActivos.set(id, interval);
+    };
+
+    // Primer disparo al llegar la hora, luego cada 24h
+    const initTimer = setTimeout(async () => {
+      const sc = cargarSchedules().find(s => s.id === id);
+      if (!sc) return;
+      const resultado = await ejecutarAccion(
+        { tipo: sc.destino, caption: sc.caption },
+        adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn
+      );
+      if (resultado) await replyFn(`⏰ *Envío diario ejecutado (${hora}):*\n${resultado}`);
+      arrancarDiario();
+    }, msHastaInicio);
+
+    timersActivos.set(id + '_init', initTimer);
+
+    const minutosRestantes = Math.round(msHastaInicio / 60000);
+    await replyFn(`📅 *Programación diaria creada* (ID: ${id})\n⏰ Hora: *${hora}* (Ciudad de México)\n🕐 Primera ejecución en ~${minutosRestantes} minutos\n\nPara cancelar di: _"cancela ${id}"_`);
+    return '';
+  }
+
+  // ENVIAR A GRUPOS
+  const caption = accion.caption || '';
+  const destinos = accion.tipo === 'ambos' ? ['grupos','estado'] : [accion.tipo];
+  const resultados = [];
+
+  for (const dest of destinos) {
+    if (dest === 'grupos') {
+      if (!imgBuffer) { resultados.push('❌ Grupos: necesito la imagen'); continue; }
+      const sg = sesiones['grupos'] || sesiones[sesionId];
+      if (!sg?.listo) { resultados.push('❌ Grupos: sesión no conectada'); continue; }
+      try {
+        const groups = await sg.sock.groupFetchAllParticipating();
+        const gids = Object.keys(groups);
+        if (!gids.length) { resultados.push('❌ Grupos: no hay grupos'); continue; }
+        await replyFn(`📤 Enviando a ${gids.length} grupos...`);
+        let ok = 0, fail = 0;
+        const isJpeg = imgBuffer[0]===0xFF && imgBuffer[1]===0xD8;
+        for (const gid of gids) {
+          try {
+            await sg.sock.sendMessage(gid, {
+              image: imgBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png',
+              ...(caption ? { caption } : {})
+            });
+            ok++;
+            await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
+          } catch(e) { fail++; }
+        }
+        registrarPromoEnviada(caption, 'grupos', ok);
+        resultados.push(`✅ Grupos: ${ok} OK, ${fail} fallidos de ${gids.length}`);
+      } catch(e) { resultados.push('❌ Grupos: ' + e.message); }
+    }
+
+    if (dest === 'estado') {
+      if (!imgBuffer) { resultados.push('❌ Estado: necesito la imagen'); continue; }
+      const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo);
+      if (!targets.length) { resultados.push('❌ Estado: no hay sesiones activas'); continue; }
+      let ok = 0, fail = 0;
+      for (const sid of targets) {
+        try {
+          const ss = sesiones[sid];
+          const jidSet = new Set(ss.contactos);
+          if (ss.numero) jidSet.add(ss.numero + '@s.whatsapp.net');
+          const statusJidList = Array.from(jidSet).slice(0, 1000);
+          if (!statusJidList.length) { fail++; continue; }
+          const isJpeg = imgBuffer[0]===0xFF && imgBuffer[1]===0xD8;
+          await ss.sock.sendMessage('status@broadcast', {
+            image: imgBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png',
+            ...(caption ? { caption } : {})
+          }, { statusJidList });
+          ok++;
+          await new Promise(r => setTimeout(r, 1500));
+        } catch(e) { fail++; }
+      }
+      registrarPromoEnviada(caption, 'estado', ok);
+      resultados.push(`✅ Estado: ${ok} sesiones OK, ${fail} fallidas`);
+    }
+  }
+
+  return resultados.join('\n');
+}
+
+// ── Restaurar programaciones diarias al arrancar ────────────
+function restaurarSchedules(sesiones, SESIONES_ACTIVAS, sesionId, replyFn) {
+  const schedules = cargarSchedules();
+  const diarios = schedules.filter(s => s.tipo === 'diario');
+  if (!diarios.length) return;
+
+  console.log(`[SCHEDULE] Restaurando ${diarios.length} programaciones diarias...`);
+
+  for (const sc of diarios) {
+    const [hh, mm] = sc.hora.split(':').map(Number);
+    const ahora = new Date();
+    const ahoraLocal = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    let proxima = new Date(ahoraLocal);
+    proxima.setHours(hh, mm, 0, 0);
+    if (proxima <= ahoraLocal) proxima.setDate(proxima.getDate() + 1);
+    const msHasta = proxima - ahoraLocal;
+
+    const arrancar = () => {
+      const interval = setInterval(async () => {
+        const s = cargarSchedules().find(x => x.id === sc.id);
+        if (!s) { clearInterval(interval); timersActivos.delete(sc.id); return; }
+        const resultado = await ejecutarAccion(
+          { tipo: s.destino, caption: s.caption },
+          adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn
+        );
+        if (resultado) await replyFn(`⏰ *Envío diario (${s.hora}):*\n${resultado}`);
+        else await replyFn(`⏰ *Envío diario (${s.hora}):* Sin imagen. Mándala y dime qué hacer.`);
+      }, 24 * 60 * 60 * 1000);
+      timersActivos.set(sc.id, interval);
+    };
+
+    setTimeout(async () => {
+      const s = cargarSchedules().find(x => x.id === sc.id);
+      if (!s) return;
+      const resultado = await ejecutarAccion(
+        { tipo: s.destino, caption: s.caption },
+        adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn
+      );
+      if (resultado) await replyFn(`⏰ *Envío diario restaurado (${s.hora}):*\n${resultado}`);
+      arrancar();
+    }, msHasta);
+
+    console.log(`[SCHEDULE] "${sc.descripcion}" restaurado → ejecuta a las ${sc.hora}`);
+  }
+}
+
+
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -253,7 +646,7 @@ async function conectarSesion(sesionId) {
       console.log(`[${sesionId}] Mensaje de ${fromJid.split('@')[0]} esAdmin=${esAdmin}`);
 
       // ══════════════════════════════════════════════
-      //  BLOQUE ADMIN — solo si es la sesión de comandos
+      //  BLOQUE ADMIN — agente conversacional de marketing
       // ══════════════════════════════════════════════
       if (esAdmin && sesionId === CMD_SESION) {
         const texto = (
@@ -276,100 +669,57 @@ async function conectarSesion(sesionId) {
               reuploadRequest: s.sock.updateMediaMessage
             });
           } catch(e) {
-            console.error('[CMD] Error descargando imagen:', e.message);
+            console.error('[AGENTE] Error descargando imagen:', e.message);
           }
         }
-
-        console.log(`[CMD] Interpretando: "${texto}" imagen=${!!imgBuffer}`);
 
         const reply = async (txt) => {
           try { await s.sock.sendMessage(fromJid, { text: txt }); } catch(e) {}
         };
 
-        // Interpretar con IA (o fallback por palabras clave)
-        const { accion, caption } = await interpretarComando(texto, !!imgBuffer);
-        console.log(`[CMD] IA → accion="${accion}" caption="${caption}"`);
-
-        // ── ACCION: estado ──────────────────────────────────────
-        if (accion === 'estado') {
-          if (!imgBuffer) { await reply('📎 Entendido, quieres publicar un estado.\n\nAdjunta la imagen junto con el mensaje.'); continue; }
-          const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo);
-          if (!targets.length) { await reply('❌ No hay sesiones conectadas.'); continue; }
-          await reply(`⏳ Publicando estado en ${targets.length} sesión(es)...`);
-          let ok = 0, fail = 0;
-          for (const sid of targets) {
-            try {
-              const ss = sesiones[sid];
-              const jidSet = new Set(ss.contactos);
-              if (ss.numero) jidSet.add(ss.numero + '@s.whatsapp.net');
-              const statusJidList = Array.from(jidSet).slice(0, 1000);
-              if (!statusJidList.length) { fail++; continue; }
-              const isJpeg = imgBuffer[0]===0xFF && imgBuffer[1]===0xD8;
-              await ss.sock.sendMessage('status@broadcast', {
-                image: imgBuffer,
-                mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-                ...(caption ? { caption } : {})
-              }, { statusJidList });
-              ok++;
-              await new Promise(r => setTimeout(r, 1500));
-            } catch(e) { fail++; console.error(`[CMD] Error estado ${sid}:`, e.message); }
-          }
-          await reply(`✅ *Estado publicado:* ${ok} sesión(es) OK, ${fail} fallidas.`);
+        // Si llegó imagen sin texto y hay una acción pendiente, ejecutar directo
+        if (imgBuffer && !texto && adminPending.accion) {
+          const accionGuardada = adminPending.accion;
+          adminPending.accion = null;
+          adminPending.imgBuffer = imgBuffer; // guardar para schedules
+          await reply('⏳ Ejecutando con la imagen...');
+          const resultado = await ejecutarAccion(accionGuardada, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply);
+          if (resultado) await reply(resultado);
           continue;
         }
 
-        // ── ACCION: grupos ──────────────────────────────────────
-        if (accion === 'grupos') {
-          if (!imgBuffer) { await reply('📎 Entendido, quieres publicar en grupos.\n\nAdjunta la imagen de la promo y manda el mensaje junto con ella.'); continue; }
-          const sg = sesiones['grupos'] || sesiones[sesionId];
-          if (!sg?.listo) { await reply('❌ La sesión "grupos" no está conectada.'); continue; }
-          await reply('⏳ Obteniendo lista de grupos...');
-          try {
-            const groups = await sg.sock.groupFetchAllParticipating();
-            const gids = Object.keys(groups);
-            if (!gids.length) { await reply('❌ No hay grupos disponibles.'); continue; }
-            await reply(`📤 Enviando a ${gids.length} grupos...`);
-            let ok = 0, fail = 0;
-            const isJpeg = imgBuffer[0]===0xFF && imgBuffer[1]===0xD8;
-            for (const gid of gids) {
-              try {
-                await sg.sock.sendMessage(gid, {
-                  image: imgBuffer,
-                  mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-                  ...(caption ? { caption } : {})
-                });
-                ok++;
-                await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
-              } catch(e) { fail++; }
-            }
-            await reply(`✅ *Listo.* ${ok} grupos OK, ${fail} fallidos de ${gids.length} totales.`);
-          } catch(e) {
-            await reply('❌ Error obteniendo grupos: ' + e.message);
+        // Guardar última imagen para que los schedules puedan usarla
+        if (imgBuffer) adminPending.imgBuffer = imgBuffer;
+
+        // Construir contexto de sesiones para el agente
+        const ctxSesiones = SESIONES_ACTIVAS.map(id => {
+          const ss = sesiones[id];
+          return `${id}: ${ss?.listo ? '🟢 conectado (+'+ss.numero+', '+ss.contactos?.size+' contactos)' : '🔴 offline'}`;
+        }).join('\n');
+
+        console.log(`[AGENTE] Admin: "${texto}" imagen=${!!imgBuffer}`);
+
+        // Llamar al agente de marketing
+        const { respuesta, accion } = await llamarAgente(texto || '[imagen sin texto]', !!imgBuffer, ctxSesiones);
+
+        // Si el agente decidió ejecutar algo
+        if (accion) {
+          const necesitaImagen = ['grupos','estado','ambos','generar_imagen'].includes(accion.tipo);
+          const esSchedule = ['programar','programar_diario'].includes(accion.tipo);
+          const esSinImagen = ['reporte','guardar_plantilla','cancelar_schedule'].includes(accion.tipo);
+
+          if (necesitaImagen && !imgBuffer && accion.tipo !== 'generar_imagen') {
+            adminPending.accion = accion;
+            await reply(respuesta);
+          } else {
+            if (respuesta) await reply(respuesta);
+            const resultado = await ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply);
+            if (resultado) await reply(resultado);
           }
-          continue;
+        } else {
+          await reply(respuesta);
         }
 
-        // ── ACCION: reporte ─────────────────────────────────────
-        if (accion === 'reporte') {
-          const lines = ['📊 *Reporte SOS Digital*\n'];
-          for (const [id, ss] of Object.entries(sesiones)) {
-            const ico = ss.listo ? '🟢' : '🔴';
-            lines.push(`${ico} *${id}* — ${ss.listo ? '+'+ss.numero : 'Offline'} (${ss.contactos?.size||0} contactos)`);
-          }
-          lines.push('\n🤖 Bot operando correctamente');
-          await reply(lines.join('\n'));
-          continue;
-        }
-
-        // ── ACCION: ayuda (default) ─────────────────────────────
-        await reply(
-          '🤖 *Panel de Control — SOS Digital*\n\n' +
-          'Escríbeme en lenguaje natural, por ejemplo:\n\n' +
-          '📸 _"Sube este estado"_ + imagen\n' +
-          '👥 _"Manda esta promo a los grupos"_ + imagen\n' +
-          '📊 _"Dame el reporte de sesiones"_\n\n' +
-          'O comandos directos: *!estado* *!grupos* *!reporte*'
-        );
         continue;
       }
 
@@ -831,4 +1181,26 @@ app.listen(PORT, () => {
     if (i < ids.length - 1) await new Promise(r => setTimeout(r, 3000));
   }
   console.log('[BOOT] ✅ Sesiones iniciadas');
+
+  // Restaurar programaciones diarias después de que las sesiones se conecten
+  setTimeout(() => {
+    const cmdSesion = sesiones[CMD_SESION];
+    const replyAdmin = async (txt) => {
+      if (!cmdSesion?.listo || !CMD_PHONE) return;
+      try {
+        await cmdSesion.sock.sendMessage(CMD_PHONE.replace(/\D/g,'') + '@s.whatsapp.net', { text: txt });
+      } catch(e) {}
+    };
+
+    const schedules = cargarSchedules();
+    if (schedules.length > 0) {
+      restaurarSchedules(sesiones, SESIONES_ACTIVAS, CMD_SESION, replyAdmin);
+      replyAdmin(
+        `🤖 *SOS Digital Bot reiniciado*\n\n` +
+        `✅ ${SESIONES_ACTIVAS.length} sesión(es) activa(s)\n` +
+        `⏰ ${schedules.filter(s=>s.tipo==='diario').length} programación(es) diaria(s) restaurada(s)\n\n` +
+        `_Escríbeme para continuar donde quedamos._`
+      );
+    }
+  }, 15000); // esperar 15s a que se conecten las sesiones
 })();
