@@ -47,7 +47,14 @@ const SESIONES_CONFIG = {
 const sesiones = {};
 for (const id of SESIONES_ACTIVAS) {
   if (SESIONES_CONFIG[id]) {
-    sesiones[id] = { sock: null, listo: false, qr: null, numero: null, reconectando: false };
+    sesiones[id] = {
+      sock: null,
+      listo: false,
+      qr: null,
+      numero: null,
+      reconectando: false,
+      contactos: new Set(), // caché de JIDs para statusJidList
+    };
   }
 }
 
@@ -88,6 +95,19 @@ async function conectarSesion(sesionId) {
       s.reconectando = false;
       s.numero = s.sock.user?.id?.split(':')[0] || null;
       console.log(`[${sesionId}] ✅ Conectado: ${s.numero}`);
+
+      // Poblar caché de contactos desde los chats existentes
+      try {
+        const chats = await s.sock.groupFetchAllParticipating().catch(() => ({}));
+        // También intentar obtener lista de chats (contacts individuales)
+        setTimeout(async () => {
+          try {
+            // groupFetchAllParticipating solo da grupos; para individuales
+            // los vamos acumulando en messages.upsert
+            console.log(`[${sesionId}] Caché contactos iniciado (${s.contactos.size} hasta ahora)`);
+          } catch(e) {}
+        }, 3000);
+      } catch(e) {}
     }
 
     if (connection === 'close') {
@@ -101,6 +121,16 @@ async function conectarSesion(sesionId) {
       } else if (!reconectar) {
         try { fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
         setTimeout(() => conectarSesion(sesionId), 3000);
+      }
+    }
+  });
+
+  // ── Acumular contactos para statusJidList ─────────────────
+  s.sock.ev.on('messages.upsert', async ({ messages }) => {
+    for (const msg of messages) {
+      const jid = msg.key?.remoteJid;
+      if (jid && jid.endsWith('@s.whatsapp.net') && !jid.includes('status@')) {
+        s.contactos.add(jid);
       }
     }
   });
@@ -458,7 +488,7 @@ app.post('/grupos/enviar', auth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 
 // Publicar imagen como estado (story) en una sesión
-// Llamado desde marketing_api.php → enviarEstadoWA()
+// Fix: Baileys requiere statusJidList para que el estado llegue correctamente
 app.post('/estado/publicar', auth, async (req, res) => {
   const { sesion, imagen_base64, caption = '' } = req.body;
 
@@ -480,14 +510,25 @@ app.post('/estado/publicar', auth, async (req, res) => {
   try {
     const imgBuffer = Buffer.from(imagen_base64, 'base64');
 
+    // Usar el caché de contactos acumulado por messages.upsert
+    // Baileys requiere statusJidList para que el estado realmente llegue
+    const statusJidList = Array.from(s.contactos).slice(0, 500);
+    console.log(`[estado] Sesión "${sesion}" → ${statusJidList.length} contactos en caché`);
+
     const msgPayload = { image: imgBuffer };
     if (caption && caption.trim()) msgPayload.caption = caption.trim();
 
-    // 'status@broadcast' es el JID especial de estados en Baileys
-    await s.sock.sendMessage('status@broadcast', msgPayload);
+    await s.sock.sendMessage(
+      'status@broadcast',
+      msgPayload,
+      { statusJidList }   // <-- esto es lo que hace que llegue
+    );
 
-    console.log(`[estado] ✅ Estado publicado en sesión "${sesion}"`);
-    res.json({ success: true, message: `Estado publicado en sesión "${sesion}"` });
+    console.log(`[estado] ✅ Estado publicado en sesión "${sesion}" → ${statusJidList.length} contactos`);
+    res.json({
+      success: true,
+      message: `Estado publicado en sesión "${sesion}" (${statusJidList.length} contactos)`
+    });
 
   } catch (err) {
     console.error(`[estado] ❌ Error en sesión "${sesion}":`, err.message);
