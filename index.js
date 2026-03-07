@@ -140,12 +140,21 @@ PERSONALIDAD
 ━━━━━━━━━━━━━━━━━━━━━━
 FLUJO DE TRABAJO (SIEMPRE seguir este orden)
 ━━━━━━━━━━━━━━━━━━━━━━
-PASO 1 — ENTENDER: Asegúrate de entender qué quiere el admin. Si algo no está claro, PREGUNTA.
-PASO 2 — PROPONER: Muestra el texto/imagen que vas a usar y pregunta si está bien.
-PASO 3 — ESPERAR APROBACIÓN: Solo ejecuta cuando el admin diga sí/dale/va/ok/mándalo/listo/aprobado/adelante/envíalo.
-PASO 4 — EJECUTAR: Pon el [ACCION] al final del mensaje.
+CASO A — Admin manda texto solo con intención clara (ej: "manda esto a los grupos: [texto]"):
+→ Ejecuta DIRECTO con [ACCION]. No pidas confirmación.
 
-NUNCA saltes al PASO 4 sin pasar por el PASO 2 y 3.
+CASO B — Admin manda imagen/video + texto con destino claro (ej: imagen + "mándala a los grupos"):
+→ Ejecuta DIRECTO con [ACCION]. No pidas confirmación.
+
+CASO C — Admin manda idea vaga sin destino claro (ej: "ayúdame con una promo de Disney+"):
+→ PASO 1: Propón el texto/caption
+→ PASO 2: Pregunta el destino (grupos, estado, ambos)
+→ PASO 3: Cuando confirme, ejecuta con [ACCION]
+
+CASO D — Admin manda imagen/video sin texto:
+→ Pregunta: "¿Qué caption le ponemos y dónde lo mandamos?"
+
+REGLA DE ORO: Si el admin ya dijo QUÉ enviar Y DÓNDE enviarlo → pon [ACCION] de inmediato, sin confirmar de nuevo.
 
 ━━━━━━━━━━━━━━━━━━━━━━
 RECONOCER INTENCIONES DEL ADMIN
@@ -191,19 +200,18 @@ FORMATO DE ACCIONES (van AL FINAL del mensaje, después de tu texto)
 ━━━━━━━━━━━━━━━━━━━━━━
 REGLAS CRÍTICAS
 ━━━━━━━━━━━━━━━━━━━━━━
-✅ "hazme una imagen de X" → SIEMPRE es generar_imagen, nunca pidas que el admin mande la imagen
+✅ Si el admin dice "manda esto a grupos: [texto]" → ejecuta YA con [ACCION:{"tipo":"grupos","caption":"[texto]"}]
+✅ Si el admin manda imagen/video con destino claro → ejecuta YA con [ACCION]
+✅ Si el admin dice "grupos", "estado", "ambos", "envíalo", "mándalo" → ejecuta YA
+✅ Texto solo a grupos SÍ funciona, no necesita imagen
+✅ "hazme una imagen de X" → SIEMPRE es generar_imagen
 ✅ Si el admin especifica modelo ("con gemini", "con flux", "con dalle"), agrégalo: [ACCION:{"tipo":"generar_imagen","prompt":"...","modelo":"gemini"}]
 ✅ Modelos disponibles: dalle3, gemini, stability, flux
-✅ Solo pon [ACCION] cuando el admin haya APROBADO explícitamente
-✅ Cuando generes una imagen con IA, DESPUÉS de mostrarla pregunta: "¿dónde la mandamos? ¿grupos, estado o ambos?"
-✅ Para promos, siempre propón el texto del caption antes de ejecutar
-✅ Si el admin dice algo ambiguo, PREGUNTA en lugar de asumir
-✅ Recuerda las promos pasadas para no repetirlas
-✅ Sugiere horarios pico: 9am, 12pm, 6pm, 8pm
-✅ El caption para WhatsApp debe ser atractivo, con emojis, precio visible y llamada a acción
-❌ NUNCA ejecutes sin aprobación
-❌ NUNCA pongas [ACCION] si falta información (imagen, destino, texto)
-❌ Si el admin pide una imagen generada por IA, NO le pidas que adjunte una imagen manualmente`;
+✅ Para promos donde no está claro el texto, propónlo primero y pregunta destino
+✅ El caption para WhatsApp: atractivo, emojis, precio visible, llamada a acción
+❌ NUNCA digas "voy a enviarlo" o "lo estoy enviando" SIN incluir [ACCION] en el mismo mensaje
+❌ NUNCA pidas confirmación si ya tienes toda la información necesaria
+❌ NUNCA pongas [ACCION] si genuinamente falta información (ni el texto ni el destino)`;
 
 // ── Llamar al agente ────────────────────────────────────────
 async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones, tieneVideo = false) {
@@ -609,7 +617,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
   for (const dest of destinos) {
     if (dest === 'grupos') {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
-      if (!mediaBuffer) { resultados.push('❌ Grupos: necesito la imagen o video'); continue; }
+      // Texto solo también es válido — no requiere imagen
+      if (!mediaBuffer && !caption) { resultados.push('❌ Grupos: necesito al menos texto o imagen'); continue; }
       const sg = sesiones['grupos'] || sesiones[sesionId];
       if (!sg?.listo) { resultados.push('❌ Grupos: sesión no conectada'); continue; }
       try {
@@ -622,11 +631,14 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         for (const gid of gids) {
           try {
             let payload;
-            if (mediaType === 'video') {
+            if (mediaType === 'video' && mediaBuffer) {
               payload = { video: mediaBuffer, mimetype: 'video/mp4', ...(caption ? { caption } : {}) };
-            } else {
+            } else if (mediaBuffer) {
               const isJpeg = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
               payload = { image: mediaBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
+            } else {
+              // Solo texto
+              payload = { text: caption };
             }
             await sg.sock.sendMessage(gid, payload);
             ok++;
@@ -634,7 +646,7 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           } catch(e) { fail++; }
         }
         registrarPromoEnviada(caption, 'grupos', ok);
-        resultados.push(`✅ Grupos: ${ok} OK, ${fail} fallidos de ${gids.length}`);
+        resultados.push(`✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}`);
       } catch(e) { resultados.push('❌ Grupos: ' + e.message); }
     }
 
@@ -927,18 +939,22 @@ async function conectarSesion(sesionId) {
           try { await s.sock.sendMessage(fromJid, { text: txt }); } catch(e) {}
         };
 
-        // Si llegó media sin texto y hay una acción pendiente, ejecutar directo
+        // ── Guardar media recibida ──────────────────────────
+        if (imgBuffer) { adminPending.imgBuffer = imgBuffer; adminPending.mediaType = 'image'; }
+        if (videoBuffer) { adminPending.videoBuffer = videoBuffer; adminPending.mediaType = 'video'; }
+
+        // Si llegó media SIN texto y hay acción pendiente → ejecutar con esa media
         if ((imgBuffer || videoBuffer) && !texto && adminPending.accion && adminPending.accion.tipo !== 'esperar_destino') {
           const accionGuardada = adminPending.accion;
           adminPending.accion = null;
-          if (imgBuffer) adminPending.imgBuffer = imgBuffer;
-          if (videoBuffer) adminPending.videoBuffer = videoBuffer;
-          adminPending.mediaType = mediaType;
           await reply('⏳ Ejecutando con el archivo...');
           const resultado = await ejecutarAccion(accionGuardada, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, videoBuffer, mediaType);
           if (resultado) await reply(resultado);
           continue;
         }
+
+        // Si llegó media CON texto → el agente lo procesa junto (imagen+texto en un solo mensaje)
+        // No interrumpir, dejar que el agente decida la acción directamente
 
         // Si hay media pendiente esperando destino y el admin dice dónde mandar
         if (adminPending.accion?.tipo === 'esperar_destino' && (adminPending.imgBuffer || adminPending.videoBuffer)) {
@@ -1055,14 +1071,15 @@ async function conectarSesion(sesionId) {
 
         // Si el agente decidió ejecutar algo
         if (accion) {
-          const necesitaImagen = ['grupos','estado','ambos','generar_imagen'].includes(accion.tipo);
-          const esSchedule = ['programar','programar_diario'].includes(accion.tipo);
-          const esSinImagen = ['reporte','guardar_plantilla','cancelar_schedule'].includes(accion.tipo);
+          const necesitaMedia = ['grupos','estado','ambos'].includes(accion.tipo);
+          const esSinMedia    = ['reporte','guardar_plantilla','cancelar_schedule','generar_imagen','programar','programar_diario'].includes(accion.tipo);
 
-          if (necesitaImagen && !imgBuffer && !videoBuffer && accion.tipo !== 'generar_imagen') {
+          if (necesitaMedia && !imgBuffer && !videoBuffer) {
+            // No hay media → guardar acción pendiente y pedir media
             adminPending.accion = accion;
-            await reply(respuesta);
+            await reply(respuesta + '\n\n📎 _Adjunta la imagen o video que quieres enviar._');
           } else {
+            // Hay media disponible O no la necesita → ejecutar directo
             if (respuesta) await reply(respuesta);
             const resultado = await ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, videoBuffer, mediaType);
             if (resultado) await reply(resultado);
