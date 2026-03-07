@@ -1072,14 +1072,16 @@ async function conectarSesion(sesionId) {
         // Si el agente decidió ejecutar algo
         if (accion) {
           const necesitaMedia = ['grupos','estado','ambos'].includes(accion.tipo);
-          const esSinMedia    = ['reporte','guardar_plantilla','cancelar_schedule','generar_imagen','programar','programar_diario'].includes(accion.tipo);
+          // Solo bloquear si necesita media Y no hay caption Y no hay archivo
+          const sinCaption = !accion.caption || accion.caption.trim() === '';
+          const sinMedia   = !imgBuffer && !videoBuffer;
 
-          if (necesitaMedia && !imgBuffer && !videoBuffer) {
-            // No hay media → guardar acción pendiente y pedir media
+          if (necesitaMedia && sinCaption && sinMedia) {
+            // No hay nada que enviar
             adminPending.accion = accion;
-            await reply(respuesta + '\n\n📎 _Adjunta la imagen o video que quieres enviar._');
+            await reply(respuesta + '\n\n📎 _Adjunta la imagen o video, o dime el texto que quieres enviar._');
           } else {
-            // Hay media disponible O no la necesita → ejecutar directo
+            // Tiene caption de texto, o tiene media, o ambos → ejecutar directo
             if (respuesta) await reply(respuesta);
             const resultado = await ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, videoBuffer, mediaType);
             if (resultado) await reply(resultado);
