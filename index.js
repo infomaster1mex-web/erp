@@ -94,7 +94,26 @@ const adminChat = [];
 const adminPending = {
   accion: null,
   imgBuffer: null,
+  videoBuffer: null,
+  mediaType: null,
 };
+
+// ── Buffer de múltiples archivos ────────────────────────────
+// Acumula imágenes/videos enviados en ráfaga (ej: 3 fotos a la vez)
+// WhatsApp los manda como mensajes separados en rápida sucesión
+const mediaBuffer = {
+  items: [],      // [{buffer, mediaType}]
+  texto: '',      // texto del último mensaje con media o del mensaje de texto que sigue
+  timer: null,    // setTimeout para procesar cuando termina la ráfaga
+  DELAY_MS: 4500, // espera 4.5s desde el último archivo antes de procesar
+};
+
+function resetMediaBuffer() {
+  if (mediaBuffer.timer) clearTimeout(mediaBuffer.timer);
+  mediaBuffer.items = [];
+  mediaBuffer.texto = '';
+  mediaBuffer.timer = null;
+}
 
 // ── Contexto de memoria para el agente ─────────────────────
 function buildContextoMemoria() {
@@ -902,98 +921,210 @@ async function conectarSesion(sesionId) {
         const texto = (
           msg.message?.conversation ||
           msg.message?.extendedTextMessage?.text ||
-          msg.message?.imageMessage?.caption || ''
+          msg.message?.imageMessage?.caption ||
+          msg.message?.videoMessage?.caption || ''
         ).trim();
 
         const tieneImagen = !!( msg.message?.imageMessage );
         const tieneVideo  = !!( msg.message?.videoMessage );
         const tieneMedia  = tieneImagen || tieneVideo;
 
-        let imgBuffer = null;
-        let videoBuffer = null;
-        let mediaType = null; // 'image' | 'video'
-
-        if (tieneImagen) {
-          try {
-            const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
-            imgBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
-              logger: pino({ level: 'silent' }),
-              reuploadRequest: s.sock.updateMediaMessage
-            });
-            mediaType = 'image';
-          } catch(e) { console.error('[AGENTE] Error descargando imagen:', e.message); }
-        }
-
-        if (tieneVideo) {
-          try {
-            const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
-            videoBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
-              logger: pino({ level: 'silent' }),
-              reuploadRequest: s.sock.updateMediaMessage
-            });
-            mediaType = 'video';
-          } catch(e) { console.error('[AGENTE] Error descargando video:', e.message); }
-        }
-
         const reply = async (txt) => {
           try { await s.sock.sendMessage(fromJid, { text: txt }); } catch(e) {}
         };
 
-        // ── Guardar media recibida ──────────────────────────
-        if (imgBuffer) { adminPending.imgBuffer = imgBuffer; adminPending.mediaType = 'image'; }
-        if (videoBuffer) { adminPending.videoBuffer = videoBuffer; adminPending.mediaType = 'video'; }
+        // ── Descargar media si viene adjunta ────────────────
+        let bufferDescargado = null;
+        let mediaTypeDescargado = null;
 
-        // Si llegó media SIN texto y hay acción pendiente → ejecutar con esa media
-        if ((imgBuffer || videoBuffer) && !texto && adminPending.accion && adminPending.accion.tipo !== 'esperar_destino') {
-          const accionGuardada = adminPending.accion;
-          adminPending.accion = null;
-          await reply('⏳ Ejecutando con el archivo...');
-          const resultado = await ejecutarAccion(accionGuardada, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, videoBuffer, mediaType);
-          if (resultado) await reply(resultado);
-          continue;
+        if (tieneMedia) {
+          try {
+            const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+            bufferDescargado = await downloadMediaMessage(msg, 'buffer', {}, {
+              logger: pino({ level: 'silent' }),
+              reuploadRequest: s.sock.updateMediaMessage
+            });
+            mediaTypeDescargado = tieneVideo ? 'video' : 'image';
+          } catch(e) {
+            console.error('[AGENTE] Error descargando media:', e.message);
+          }
         }
 
-        // Si llegó media CON texto → el agente lo procesa junto (imagen+texto en un solo mensaje)
-        // No interrumpir, dejar que el agente decida la acción directamente
+        // ══════════════════════════════════════════════
+        //  SISTEMA DE BUFFER PARA MÚLTIPLES ARCHIVOS
+        //  WhatsApp manda cada imagen como mensaje separado
+        //  Acumulamos todos los que lleguen en ~4.5s
+        // ══════════════════════════════════════════════
+        if (bufferDescargado) {
+          // Agregar al buffer
+          mediaBuffer.items.push({ buffer: bufferDescargado, mediaType: mediaTypeDescargado });
+          if (texto) mediaBuffer.texto = texto; // guardar caption si viene con la imagen
 
-        // Si hay media pendiente esperando destino y el admin dice dónde mandar
-        if (adminPending.accion?.tipo === 'esperar_destino' && (adminPending.imgBuffer || adminPending.videoBuffer)) {
+          // Reiniciar el timer (esperar a que no lleguen más archivos)
+          if (mediaBuffer.timer) clearTimeout(mediaBuffer.timer);
+
+          const conteo = mediaBuffer.items.length;
+          if (conteo === 1) {
+            // Primer archivo — avisar que está esperando más
+            // (solo si no trae texto, para no interrumpir)
+            if (!texto) {
+              await reply(`📎 Archivo recibido. Si vas a mandar más, espera... los acumulo todos juntos.\n_Tengo ${conteo} archivo(s)_`);
+            }
+          } else {
+            // Archivos adicionales — actualizar conteo
+            await reply(`📎 _Acumulando... ${conteo} archivo(s) recibidos. Esperando más..._`);
+          }
+
+          // Timer: procesar cuando paren de llegar archivos
+          mediaBuffer.timer = setTimeout(async () => {
+            const items = [...mediaBuffer.items];
+            const textoBuffer = mediaBuffer.texto;
+            resetMediaBuffer();
+
+            if (!items.length) return;
+
+            // Guardar el último buffer en adminPending para schedules
+            const ultimoItem = items[items.length - 1];
+            if (ultimoItem.mediaType === 'image') {
+              adminPending.imgBuffer = ultimoItem.buffer;
+              adminPending.mediaType = 'image';
+            } else {
+              adminPending.videoBuffer = ultimoItem.buffer;
+              adminPending.mediaType = 'video';
+            }
+
+            const cantidad = items.length;
+            console.log(`[BUFFER] Procesando ${cantidad} archivo(s) con texto: "${textoBuffer}"`);
+
+            if (cantidad === 1) {
+              // Un solo archivo — flujo normal
+              const item = items[0];
+              const imgBuf   = item.mediaType === 'image' ? item.buffer : null;
+              const vidBuf   = item.mediaType === 'video' ? item.buffer : null;
+
+              if (textoBuffer) {
+                // Tiene texto → pregunta destino o ejecuta si ya está claro
+                await reply(`📎 Tengo 1 ${item.mediaType === 'video' ? 'video' : 'imagen'} lista.\n\n¿Dónde la mandamos?\n📤 *grupos* | 📸 *estado* | 🔄 *ambos*`);
+                adminPending.accion = { tipo: 'esperar_destino', caption: textoBuffer };
+              } else {
+                await reply(`📎 Tengo 1 ${item.mediaType === 'video' ? 'video' : 'imagen'}.\n\n¿Con qué texto la mandamos y a dónde?\n_(Di el texto + grupos/estado/ambos)_`);
+                adminPending.accion = { tipo: 'esperar_destino', caption: '' };
+              }
+              return;
+            }
+
+            // Múltiples archivos
+            const tiposResumen = items.map((it, i) => `  ${i+1}. ${it.mediaType === 'video' ? '🎥 video' : '🖼️ imagen'}`).join('\n');
+            await reply(
+              `📦 *${cantidad} archivos recibidos:*\n${tiposResumen}\n\n` +
+              `${textoBuffer ? `📝 Caption guardado: _"${textoBuffer}"_\n\n` : ''}` +
+              `¿A dónde los mandamos?\n📤 *grupos* | 📸 *estado* | 🔄 *ambos*\n\n` +
+              `_(Se enviarán en secuencia con una pequeña pausa entre cada uno)_`
+            );
+            // Guardar todos en pending para envío múltiple
+            adminPending.accion = {
+              tipo: 'esperar_destino_multiple',
+              caption: textoBuffer,
+              items,
+            };
+          }, mediaBuffer.DELAY_MS);
+
+          continue; // no procesar más este mensaje — el timer se encarga
+        }
+
+        // ── Si hay texto y hay acción pendiente de múltiples archivos ──
+        if (!tieneMedia && texto && adminPending.accion?.tipo === 'esperar_destino_multiple') {
           const textoLower = texto.toLowerCase().trim();
           let destinoElegido = null;
-
-          if (/^(grupos?|grupo|mándalo|mandalo|envía|envia|envíalo|envialo)/.test(textoLower)) {
-            destinoElegido = 'grupos';
-          } else if (/^(estado|story|stories|súbelo|subelo)/.test(textoLower)) {
-            destinoElegido = 'estado';
-          } else if (/^(ambos|todo|grupos? y estado|los dos)/.test(textoLower)) {
-            destinoElegido = 'ambos';
-          } else if (/^(no|cancela|descartar|borrar|olvídalo|olvidalo)/.test(textoLower)) {
+          if (/^(grupos?|grupo|mándalo|mandalo|envía|envia|envíalo|envialo)/.test(textoLower)) destinoElegido = 'grupos';
+          else if (/^(estado|story|stories|súbelo|subelo)/.test(textoLower)) destinoElegido = 'estado';
+          else if (/^(ambos|todo|grupos? y estado|los dos)/.test(textoLower)) destinoElegido = 'ambos';
+          else if (/^(no|cancela|descartar|borrar|olvídalo|olvidalo)/.test(textoLower)) {
             adminPending.accion = null;
-            await reply('🗑️ Ok, descartado. El archivo queda guardado por si lo necesitas después.\n\n¿Qué más necesitas?');
+            await reply('🗑️ Archivos descartados. ¿Qué más necesitas?');
             continue;
           }
 
           if (destinoElegido) {
-            const caption = adminPending.accion.caption || '';
-            const accionFinal = { tipo: destinoElegido, caption };
+            const { items, caption } = adminPending.accion;
             adminPending.accion = null;
-            await reply(`📤 Perfecto, enviando a *${destinoElegido}*...`);
-            const resultado = await ejecutarAccion(accionFinal, adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, adminPending.videoBuffer, adminPending.mediaType);
+            await reply(`📤 Enviando *${items.length} archivos* a *${destinoElegido}*...`);
+            let resultados = [];
+            for (let i = 0; i < items.length; i++) {
+              const item = items[i];
+              const imgBuf = item.mediaType === 'image' ? item.buffer : null;
+              const vidBuf = item.mediaType === 'video' ? item.buffer : null;
+              // Solo el último o primero lleva caption
+              const capItem = i === 0 ? caption : '';
+              const accionItem = { tipo: destinoElegido, caption: capItem };
+              const res = await ejecutarAccion(accionItem, imgBuf, sesiones, SESIONES_ACTIVAS, sesionId, reply, vidBuf, item.mediaType);
+              if (res) resultados.push(`${i+1}. ${res}`);
+              if (i < items.length - 1) await new Promise(r => setTimeout(r, 3000));
+            }
+            await reply(`✅ *Envío múltiple completado:*\n${resultados.join('\n')}`);
+            continue;
+          }
+        }
+
+        // ── Respuesta a destino para UN solo archivo pendiente ──
+        if (!tieneMedia && texto && adminPending.accion?.tipo === 'esperar_destino' && (adminPending.imgBuffer || adminPending.videoBuffer)) {
+          const textoLower = texto.toLowerCase().trim();
+          let destinoElegido = null;
+          if (/^(grupos?|grupo|mándalo|mandalo|envía|envia|envíalo|envialo)/.test(textoLower)) destinoElegido = 'grupos';
+          else if (/^(estado|story|stories|súbelo|subelo)/.test(textoLower)) destinoElegido = 'estado';
+          else if (/^(ambos|todo|grupos? y estado|los dos)/.test(textoLower)) destinoElegido = 'ambos';
+          else if (/^(no|cancela|descartar|borrar|olvídalo|olvidalo)/.test(textoLower)) {
+            adminPending.accion = null;
+            await reply('🗑️ Ok, descartado. ¿Qué más necesitas?');
+            continue;
+          }
+          if (destinoElegido) {
+            const caption = adminPending.accion.caption || '';
+            adminPending.accion = null;
+            await reply(`📤 Enviando a *${destinoElegido}*...`);
+            const resultado = await ejecutarAccion(
+              { tipo: destinoElegido, caption },
+              adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply,
+              adminPending.videoBuffer, adminPending.mediaType
+            );
             if (resultado) await reply(resultado);
             continue;
           }
         }
 
-        // Guardar última media para que los schedules puedan usarla
-        if (imgBuffer) { adminPending.imgBuffer = imgBuffer; adminPending.mediaType = 'image'; }
-        if (videoBuffer) { adminPending.videoBuffer = videoBuffer; adminPending.mediaType = 'video'; }
+        // ── Si llega texto mientras el buffer está acumulando archivos ──
+        if (!tieneMedia && mediaBuffer.items.length > 0) {
+          // Guardar el texto como caption y no interrumpir el buffer
+          mediaBuffer.texto = texto;
+          await reply(`📝 Caption guardado: _"${texto}"_\nSiguiendo con los archivos...`);
+          continue;
+        }
+
+        // ── Guardar última media en adminPending ────────────
+        if (bufferDescargado) {
+          if (mediaTypeDescargado === 'image') { adminPending.imgBuffer = bufferDescargado; adminPending.mediaType = 'image'; }
+          else { adminPending.videoBuffer = bufferDescargado; adminPending.mediaType = 'video'; }
+        }
+
+        // ── Media sin texto y acción pendiente simple ───────
+        if (bufferDescargado && !texto && adminPending.accion && adminPending.accion.tipo !== 'esperar_destino' && adminPending.accion.tipo !== 'esperar_destino_multiple') {
+          const accionGuardada = adminPending.accion;
+          adminPending.accion = null;
+          await reply('⏳ Ejecutando con el archivo...');
+          const imgBuf = mediaTypeDescargado === 'image' ? bufferDescargado : null;
+          const vidBuf = mediaTypeDescargado === 'video' ? bufferDescargado : null;
+          const resultado = await ejecutarAccion(accionGuardada, imgBuf, sesiones, SESIONES_ACTIVAS, sesionId, reply, vidBuf, mediaTypeDescargado);
+          if (resultado) await reply(resultado);
+          continue;
+        }
 
         // ── Comandos directos (sin IA) ──────────────────────
         const textoCmds = texto.toLowerCase().trim();
         if (textoCmds === '!reset' || textoCmds === 'reset' || textoCmds === '!reiniciar') {
           adminChat.length = 0;
           adminPending.accion = null;
-          await reply('🔄 Historial de conversación limpiado. ¡Empezamos de cero!\n\nPuedes decirme:\n• "hazme una imagen de Disney+ a $35"\n• "manda una promo a los grupos"\n• "dame el reporte"\n• "programa una promo diaria a las 9am"');
+          resetMediaBuffer();
+          await reply('🔄 Historial limpiado. ¡Empezamos de cero!\n\nPuedes decirme:\n• "hazme una imagen de Disney+ a $35"\n• "manda una promo a los grupos"\n• "dame el reporte"\n• "programa una promo diaria a las 9am"');
           continue;
         }
         if (textoCmds === '!ayuda' || textoCmds === '!help' || textoCmds === 'ayuda') {
@@ -1009,6 +1140,7 @@ async function conectarSesion(sesionId) {
             '⏰ "mándalo en 30 minutos"\n' +
             '📊 "dame el reporte de sesiones"\n' +
             '💾 "guarda esta plantilla como promo_netflix"\n\n' +
+            '📦 *Múltiples archivos:* Manda 2, 3 o más imágenes seguidas y los envío todos.\n\n' +
             '🔄 Escribe *!reset* si el bot se confunde\n' +
             '📋 Escribe *!estado* para ver programaciones activas\n' +
             '🎨 Escribe *!modelo* para ver/cambiar modelo de imágenes\n\n' +
@@ -1053,41 +1185,35 @@ async function conectarSesion(sesionId) {
           continue;
         }
 
-        // Construir contexto de sesiones para el agente
-        const ctxSesiones = SESIONES_ACTIVAS.map(id => {
-          const ss = sesiones[id];
-          return `${id}: ${ss?.listo ? '🟢 conectado (+'+ss.numero+', '+ss.contactos?.size+' contactos)' : '🔴 offline'}`;
-        }).join('\n');
+        // ── Solo texto sin media → pasar al agente ───────────
+        if (!tieneMedia) {
+          const ctxSesiones = SESIONES_ACTIVAS.map(id => {
+            const ss = sesiones[id];
+            return `${id}: ${ss?.listo ? '🟢 conectado (+'+ss.numero+', '+ss.contactos?.size+' contactos)' : '🔴 offline'}`;
+          }).join('\n');
 
-        console.log(`[AGENTE] Admin: "${texto}" imagen=${!!imgBuffer} video=${!!videoBuffer}`);
+          console.log(`[AGENTE] Admin: "${texto}" imagen=false video=false`);
 
-        // Llamar al agente de marketing
-        const { respuesta, accion } = await llamarAgente(
-          texto || `[admin mandó un ${mediaType || 'archivo'} sin texto]`,
-          tieneImagen,
-          ctxSesiones,
-          tieneVideo
-        );
+          const { respuesta, accion } = await llamarAgente(texto, false, ctxSesiones, false);
 
-        // Si el agente decidió ejecutar algo
-        if (accion) {
-          const necesitaMedia = ['grupos','estado','ambos'].includes(accion.tipo);
-          // Solo bloquear si necesita media Y no hay caption Y no hay archivo
-          const sinCaption = !accion.caption || accion.caption.trim() === '';
-          const sinMedia   = !imgBuffer && !videoBuffer;
+          if (accion) {
+            const necesitaMedia = ['grupos','estado','ambos'].includes(accion.tipo);
+            const sinCaption    = !accion.caption || accion.caption.trim() === '';
+            const sinMedia      = !adminPending.imgBuffer && !adminPending.videoBuffer;
 
-          if (necesitaMedia && sinCaption && sinMedia) {
-            // No hay nada que enviar
-            adminPending.accion = accion;
-            await reply(respuesta + '\n\n📎 _Adjunta la imagen o video, o dime el texto que quieres enviar._');
+            if (necesitaMedia && sinCaption && sinMedia) {
+              adminPending.accion = accion;
+              await reply(respuesta + '\n\n📎 _Adjunta la imagen o video, o dime el texto que quieres enviar._');
+            } else {
+              if (respuesta) await reply(respuesta);
+              const imgBuf = adminPending.mediaType === 'image' ? adminPending.imgBuffer : null;
+              const vidBuf = adminPending.mediaType === 'video' ? adminPending.videoBuffer : null;
+              const resultado = await ejecutarAccion(accion, imgBuf, sesiones, SESIONES_ACTIVAS, sesionId, reply, vidBuf, adminPending.mediaType);
+              if (resultado) await reply(resultado);
+            }
           } else {
-            // Tiene caption de texto, o tiene media, o ambos → ejecutar directo
-            if (respuesta) await reply(respuesta);
-            const resultado = await ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, videoBuffer, mediaType);
-            if (resultado) await reply(resultado);
+            await reply(respuesta);
           }
-        } else {
-          await reply(respuesta);
         }
 
         continue;
