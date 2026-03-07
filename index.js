@@ -156,11 +156,11 @@ RECONOCER INTENCIONES DEL ADMIN
    → NUNCA interpretes esto como querer mandar imagen a grupos. Primero generas, luego preguntas dónde enviar.
 
 📤 MANDAR A GRUPOS — cuando el admin dice:
-   "mándalo a los grupos", "envía esto a los grupos", "publícalo en grupos", y YA TIENE una imagen adjunta o aprobada
+   "mándalo a los grupos", "envía esto a los grupos", "publícalo en grupos", y YA TIENE una imagen o video adjunto o aprobado
    → USA: [ACCION:{"tipo":"grupos","caption":"..."}]
 
 📸 SUBIR ESTADO — cuando el admin dice:
-   "súbelo como estado", "ponlo en mis estados", "publícalo de estado/story"
+   "súbelo como estado", "ponlo en mis estados", "publícalo de estado/story" (funciona con imagen Y video)
    → USA: [ACCION:{"tipo":"estado","caption":"..."}]
 
 🔄 AMBOS — cuando el admin dice:
@@ -206,19 +206,18 @@ REGLAS CRÍTICAS
 ❌ Si el admin pide una imagen generada por IA, NO le pidas que adjunte una imagen manualmente`;
 
 // ── Llamar al agente ────────────────────────────────────────
-async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones) {
+async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones, tieneVideo = false) {
   if (!OPENAI_KEY) {
     return { respuesta: '⚙️ Falta OPENAI_API_KEY en las variables de Railway.', accion: null };
   }
 
   const memoriaCtx = buildContextoMemoria();
 
-  // Construir el mensaje del usuario con contexto de imagen
   let msgUser = mensajeAdmin;
-  if (tieneImagen && mensajeAdmin && mensajeAdmin !== '[imagen sin texto]') {
-    msgUser = `${mensajeAdmin}\n[El admin adjuntó una imagen junto con este mensaje]`;
-  } else if (tieneImagen) {
-    msgUser = '[El admin mandó una imagen sin texto]';
+  if (tieneVideo && mensajeAdmin && !mensajeAdmin.startsWith('[admin')) {
+    msgUser = `${mensajeAdmin}\n[El admin adjuntó un VIDEO junto con este mensaje]`;
+  } else if (tieneImagen && mensajeAdmin && !mensajeAdmin.startsWith('[admin')) {
+    msgUser = `${mensajeAdmin}\n[El admin adjuntó una IMAGEN junto con este mensaje]`;
   }
 
   adminChat.push({ role: 'user', content: msgUser });
@@ -439,7 +438,13 @@ async function generarImagen(prompt, modelo = null) {
 }
 
 // ── Ejecutar acción ─────────────────────────────────────────
-async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn) {
+async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn, videoBuffer = null, mediaType = null) {
+
+  // Auto-detectar tipo de media si no se especifica
+  if (!mediaType) {
+    if (videoBuffer) mediaType = 'video';
+    else if (imgBuffer) mediaType = 'image';
+  }
 
   // REPORTE
   if (accion.tipo === 'reporte') {
@@ -493,7 +498,7 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           CMD_PHONE.replace(/\D/g,'') + '@s.whatsapp.net',
           {
             image: buf,
-            caption: '👆 Aquí está la imagen generada.\n\n¿Dónde la publicamos?\n\n📤 *grupos* — la mando a todos los grupos\n📸 *estado* — la subo como story\n🔄 *ambos* — grupos y estado\n❌ *no* — descárgala pero no publiques'
+            caption: '👆 Aquí está la imagen generada.\n\n¿Dónde la publicamos?\n\n📤 *grupos* — la mando a todos los grupos\n📸 *estado* — la subo como story\n🔄 *ambos* — grupos y estado\n❌ *no* — no publiques\n\n💡 O mándame un *video* y lo publicaré en su lugar.'
           }
         );
       }
@@ -603,7 +608,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
 
   for (const dest of destinos) {
     if (dest === 'grupos') {
-      if (!imgBuffer) { resultados.push('❌ Grupos: necesito la imagen'); continue; }
+      const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
+      if (!mediaBuffer) { resultados.push('❌ Grupos: necesito la imagen o video'); continue; }
       const sg = sesiones['grupos'] || sesiones[sesionId];
       if (!sg?.listo) { resultados.push('❌ Grupos: sesión no conectada'); continue; }
       try {
@@ -612,13 +618,17 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         if (!gids.length) { resultados.push('❌ Grupos: no hay grupos'); continue; }
         await replyFn(`📤 Enviando a ${gids.length} grupos...`);
         let ok = 0, fail = 0;
-        const isJpeg = imgBuffer[0]===0xFF && imgBuffer[1]===0xD8;
+
         for (const gid of gids) {
           try {
-            await sg.sock.sendMessage(gid, {
-              image: imgBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-              ...(caption ? { caption } : {})
-            });
+            let payload;
+            if (mediaType === 'video') {
+              payload = { video: mediaBuffer, mimetype: 'video/mp4', ...(caption ? { caption } : {}) };
+            } else {
+              const isJpeg = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
+              payload = { image: mediaBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
+            }
+            await sg.sock.sendMessage(gid, payload);
             ok++;
             await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
           } catch(e) { fail++; }
@@ -629,7 +639,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     }
 
     if (dest === 'estado') {
-      if (!imgBuffer) { resultados.push('❌ Estado: necesito la imagen'); continue; }
+      const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
+      if (!mediaBuffer) { resultados.push('❌ Estado: necesito la imagen o video'); continue; }
       const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo);
       if (!targets.length) { resultados.push('❌ Estado: no hay sesiones activas'); continue; }
       let ok = 0, fail = 0;
@@ -640,11 +651,16 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           if (ss.numero) jidSet.add(ss.numero + '@s.whatsapp.net');
           const statusJidList = Array.from(jidSet).slice(0, 1000);
           if (!statusJidList.length) { fail++; continue; }
-          const isJpeg = imgBuffer[0]===0xFF && imgBuffer[1]===0xD8;
-          await ss.sock.sendMessage('status@broadcast', {
-            image: imgBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-            ...(caption ? { caption } : {})
-          }, { statusJidList });
+
+          let payload;
+          if (mediaType === 'video') {
+            payload = { video: mediaBuffer, mimetype: 'video/mp4', ...(caption ? { caption } : {}) };
+          } else {
+            const isJpeg = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
+            payload = { image: mediaBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
+          }
+
+          await ss.sock.sendMessage('status@broadcast', payload, { statusJidList });
           ok++;
           await new Promise(r => setTimeout(r, 1500));
         } catch(e) { fail++; }
@@ -877,12 +893,14 @@ async function conectarSesion(sesionId) {
           msg.message?.imageMessage?.caption || ''
         ).trim();
 
-        const tieneImagen = !!(
-          msg.message?.imageMessage ||
-          msg.message?.documentMessage
-        );
+        const tieneImagen = !!( msg.message?.imageMessage );
+        const tieneVideo  = !!( msg.message?.videoMessage );
+        const tieneMedia  = tieneImagen || tieneVideo;
 
         let imgBuffer = null;
+        let videoBuffer = null;
+        let mediaType = null; // 'image' | 'video'
+
         if (tieneImagen) {
           try {
             const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
@@ -890,28 +908,40 @@ async function conectarSesion(sesionId) {
               logger: pino({ level: 'silent' }),
               reuploadRequest: s.sock.updateMediaMessage
             });
-          } catch(e) {
-            console.error('[AGENTE] Error descargando imagen:', e.message);
-          }
+            mediaType = 'image';
+          } catch(e) { console.error('[AGENTE] Error descargando imagen:', e.message); }
+        }
+
+        if (tieneVideo) {
+          try {
+            const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+            videoBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
+              logger: pino({ level: 'silent' }),
+              reuploadRequest: s.sock.updateMediaMessage
+            });
+            mediaType = 'video';
+          } catch(e) { console.error('[AGENTE] Error descargando video:', e.message); }
         }
 
         const reply = async (txt) => {
           try { await s.sock.sendMessage(fromJid, { text: txt }); } catch(e) {}
         };
 
-        // Si llegó imagen sin texto y hay una acción pendiente, ejecutar directo
-        if (imgBuffer && !texto && adminPending.accion && adminPending.accion.tipo !== 'esperar_destino') {
+        // Si llegó media sin texto y hay una acción pendiente, ejecutar directo
+        if ((imgBuffer || videoBuffer) && !texto && adminPending.accion && adminPending.accion.tipo !== 'esperar_destino') {
           const accionGuardada = adminPending.accion;
           adminPending.accion = null;
-          adminPending.imgBuffer = imgBuffer; // guardar para schedules
-          await reply('⏳ Ejecutando con la imagen...');
-          const resultado = await ejecutarAccion(accionGuardada, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply);
+          if (imgBuffer) adminPending.imgBuffer = imgBuffer;
+          if (videoBuffer) adminPending.videoBuffer = videoBuffer;
+          adminPending.mediaType = mediaType;
+          await reply('⏳ Ejecutando con el archivo...');
+          const resultado = await ejecutarAccion(accionGuardada, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, videoBuffer, mediaType);
           if (resultado) await reply(resultado);
           continue;
         }
 
-        // Si hay imagen pendiente esperando destino y el admin dice dónde mandar
-        if (adminPending.accion?.tipo === 'esperar_destino' && adminPending.imgBuffer) {
+        // Si hay media pendiente esperando destino y el admin dice dónde mandar
+        if (adminPending.accion?.tipo === 'esperar_destino' && (adminPending.imgBuffer || adminPending.videoBuffer)) {
           const textoLower = texto.toLowerCase().trim();
           let destinoElegido = null;
 
@@ -923,7 +953,7 @@ async function conectarSesion(sesionId) {
             destinoElegido = 'ambos';
           } else if (/^(no|cancela|descartar|borrar|olvídalo|olvidalo)/.test(textoLower)) {
             adminPending.accion = null;
-            await reply('🗑️ Ok, descartada. La imagen queda guardada por si la necesitas después.\n\n¿Qué más necesitas?');
+            await reply('🗑️ Ok, descartado. El archivo queda guardado por si lo necesitas después.\n\n¿Qué más necesitas?');
             continue;
           }
 
@@ -932,15 +962,15 @@ async function conectarSesion(sesionId) {
             const accionFinal = { tipo: destinoElegido, caption };
             adminPending.accion = null;
             await reply(`📤 Perfecto, enviando a *${destinoElegido}*...`);
-            const resultado = await ejecutarAccion(accionFinal, adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply);
+            const resultado = await ejecutarAccion(accionFinal, adminPending.imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, adminPending.videoBuffer, adminPending.mediaType);
             if (resultado) await reply(resultado);
             continue;
           }
-          // Si no reconoció el destino, dejar que el agente responda normalmente
         }
 
-        // Guardar última imagen para que los schedules puedan usarla
-        if (imgBuffer) adminPending.imgBuffer = imgBuffer;
+        // Guardar última media para que los schedules puedan usarla
+        if (imgBuffer) { adminPending.imgBuffer = imgBuffer; adminPending.mediaType = 'image'; }
+        if (videoBuffer) { adminPending.videoBuffer = videoBuffer; adminPending.mediaType = 'video'; }
 
         // ── Comandos directos (sin IA) ──────────────────────
         const textoCmds = texto.toLowerCase().trim();
@@ -1013,10 +1043,15 @@ async function conectarSesion(sesionId) {
           return `${id}: ${ss?.listo ? '🟢 conectado (+'+ss.numero+', '+ss.contactos?.size+' contactos)' : '🔴 offline'}`;
         }).join('\n');
 
-        console.log(`[AGENTE] Admin: "${texto}" imagen=${!!imgBuffer}`);
+        console.log(`[AGENTE] Admin: "${texto}" imagen=${!!imgBuffer} video=${!!videoBuffer}`);
 
         // Llamar al agente de marketing
-        const { respuesta, accion } = await llamarAgente(texto || '[imagen sin texto]', !!imgBuffer, ctxSesiones);
+        const { respuesta, accion } = await llamarAgente(
+          texto || `[admin mandó un ${mediaType || 'archivo'} sin texto]`,
+          tieneImagen,
+          ctxSesiones,
+          tieneVideo
+        );
 
         // Si el agente decidió ejecutar algo
         if (accion) {
@@ -1024,12 +1059,12 @@ async function conectarSesion(sesionId) {
           const esSchedule = ['programar','programar_diario'].includes(accion.tipo);
           const esSinImagen = ['reporte','guardar_plantilla','cancelar_schedule'].includes(accion.tipo);
 
-          if (necesitaImagen && !imgBuffer && accion.tipo !== 'generar_imagen') {
+          if (necesitaImagen && !imgBuffer && !videoBuffer && accion.tipo !== 'generar_imagen') {
             adminPending.accion = accion;
             await reply(respuesta);
           } else {
             if (respuesta) await reply(respuesta);
-            const resultado = await ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply);
+            const resultado = await ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, reply, videoBuffer, mediaType);
             if (resultado) await reply(resultado);
           }
         } else {
