@@ -983,6 +983,52 @@ async function conectarSesion(sesionId) {
           const texto = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
           if (!texto) { continue; }
 
+          // ── Detección directa de respuesta a imagen pendiente ─────
+          if (s._pendingImg && Date.now() - s._pendingImg.ts < 300000) {
+            const t = texto.toLowerCase();
+            let destino = null;
+            if (t.includes('ambos') || t.includes('todo') || t.includes('los dos')) destino = 'ambos';
+            else if (t.includes('grupo')) destino = 'grupos';
+            else if (t.includes('estado')) destino = 'estado';
+
+            if (destino) {
+              const img = s._pendingImg;
+              s._pendingImg = null;
+              try {
+                if (destino === 'estado' || destino === 'ambos') {
+                  const sesionEstado = sesiones['avisos'] || s;
+                  const contactos = Array.from(sesionEstado.contactos || s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
+                  const statusJidList = [...new Set(contactos)].slice(0, 1000);
+                  await sesionEstado.sock.sendMessage('status@broadcast', {
+                    image: img.buffer, caption: img.caption || undefined, mimetype: 'image/jpeg'
+                  }, { statusJidList });
+                  console.log(`[personal] ✅ Estado publicado (${statusJidList.length} contactos)`);
+                }
+                if (destino === 'grupos' || destino === 'ambos') {
+                  const sg = sesiones['grupos'] || sesiones['avisos'];
+                  if (sg?.listo) {
+                    const groups = await sg.sock.groupFetchAllParticipating();
+                    const gids = Object.keys(groups);
+                    let ok = 0;
+                    for (const gid of gids) {
+                      try {
+                        await sg.sock.sendMessage(gid, { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) });
+                        ok++;
+                        await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
+                      } catch(e) {}
+                    }
+                    console.log(`[personal] ✅ Imagen enviada a ${ok} grupos`);
+                  }
+                }
+                await s.sock.sendMessage(selfJid, { text: `✅ Listo, imagen publicada en ${destino}. 🤖` });
+              } catch(e) {
+                await s.sock.sendMessage(selfJid, { text: `❌ Error: ${e.message} 🤖` });
+              }
+              continue;
+            }
+          }
+          // ─────────────────────────────────────────────────────────
+
           try {
             // Cargar historial y memoria del agente personal
             const AGENTE_FILE = path.join(__dirname, 'auth_info', 'agente_personal.json');
