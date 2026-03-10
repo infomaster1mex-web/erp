@@ -1684,7 +1684,7 @@ app.get('/perfil/foto', auth, async (req, res) => {
     const imgRes = await fetch(url);
     if (!imgRes.ok) return res.json({ success: false, message: 'No se pudo descargar la imagen' });
 
-    const buffer = await imgRes.buffer();
+    const buffer = Buffer.from(await imgRes.arrayBuffer());
     res.set('Content-Type', 'image/jpeg');
     res.set('Cache-Control', 'public, max-age=3600');
     res.send(buffer);
