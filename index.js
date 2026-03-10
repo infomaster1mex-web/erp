@@ -909,19 +909,22 @@ async function conectarSesion(sesionId) {
       // ══════════════════════════════════════════════
       if (msg.key.fromMe && sesionId === 'personal') {
         const tieneImagen = !!msg.message?.imageMessage;
-        if (tieneImagen && type === 'notify') {
-          const msgId = msg.key.id;
-          const msgTs = (msg.messageTimestamp || 0) * 1000;
-          const ahoraMs = Date.now();
-          // Ignorar mensajes con más de 60 segundos de antigüedad (evita reprocess al reconectar)
-          if (ahoraMs - msgTs > 60000) { continue; }
-          if (!s._processedIds) s._processedIds = new Set();
-          if (s._processedIds.has(msgId)) continue;
-          s._processedIds.add(msgId);
-          if (s._processedIds.size > 200) {
-            const first = s._processedIds.values().next().value;
-            s._processedIds.delete(first);
-          }
+        const tieneTexto  = !!(msg.message?.conversation || msg.message?.extendedTextMessage?.text);
+
+        if (type !== 'notify') { continue; }
+
+        const msgId = msg.key.id;
+        const msgTs = (msg.messageTimestamp || 0) * 1000;
+        if (Date.now() - msgTs > 30000) { continue; }
+        if (!s._processedIds) s._processedIds = new Set();
+        if (s._processedIds.has(msgId)) { continue; }
+        s._processedIds.add(msgId);
+        if (s._processedIds.size > 200) s._processedIds.delete(s._processedIds.values().next().value);
+
+        const selfJid = msg.key.remoteJid;
+
+        // ── IMAGEN → publicar estado ─────────────────────────────
+        if (tieneImagen) {
           try {
             const caption = msg.message.imageMessage?.caption || '';
             const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
@@ -930,25 +933,129 @@ async function conectarSesion(sesionId) {
               reuploadRequest: s.sock.updateMediaMessage
             });
             if (imgBuffer && imgBuffer.length > 1000) {
-              // Publicar como estado
               const contactos = Array.from(s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
               const propioJid = s.numero ? s.numero + '@s.whatsapp.net' : null;
               if (propioJid) contactos.push(propioJid);
               const statusJidList = [...new Set(contactos)].slice(0, 1000);
-
               await s.sock.sendMessage('status@broadcast', {
-                image: imgBuffer,
-                caption: caption || undefined,
-                mimetype: 'image/jpeg'
+                image: imgBuffer, caption: caption || undefined, mimetype: 'image/jpeg'
               }, { statusJidList });
-
               console.log(`[personal] ✅ Estado publicado (${statusJidList.length} contactos) msgId=${msgId}`);
             }
-          } catch(e) {
-            console.error('[personal] ❌ Error publicando estado:', e.message);
+          } catch(e) { console.error('[personal] ❌ Error estado:', e.message); }
+        }
 
+        // ── TEXTO → Agente IA personal ───────────────────────────
+        if (tieneTexto && OPENAI_KEY) {
+          const texto = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
+          if (!texto) { continue; }
+
+          try {
+            // Cargar historial y memoria del agente personal
+            const AGENTE_FILE = path.join(__dirname, 'auth_info', 'agente_personal.json');
+            let agente = { historial: [], memoria: [], recordatorios: [] };
+            try { if (fs.existsSync(AGENTE_FILE)) agente = JSON.parse(fs.readFileSync(AGENTE_FILE, 'utf8')); } catch(e) {}
+
+            // Hora actual México
+            const ahoraMX = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City', dateStyle: 'full', timeStyle: 'short' });
+
+            // Verificar recordatorios pendientes
+            const ahora = Date.now();
+            const recordatoriosVencidos = agente.recordatorios.filter(r => !r.enviado && r.timestamp <= ahora);
+            for (const r of recordatoriosVencidos) {
+              try {
+                await s.sock.sendMessage(selfJid, { text: `⏰ *Recordatorio:* ${r.texto}` });
+                r.enviado = true;
+              } catch(e) {}
+            }
+            if (recordatoriosVencidos.length > 0) {
+              fs.writeFileSync(AGENTE_FILE, JSON.stringify(agente, null, 2));
+            }
+
+            // Construir historial (últimos 15 mensajes)
+            const histReciente = agente.historial.slice(-15);
+            const memoriaStr = agente.memoria.length > 0
+              ? '\n\nLo que sé de ti:\n' + agente.memoria.map(m => `• ${m}`).join('\n')
+              : '';
+            const recordatoriosStr = agente.recordatorios.filter(r => !r.enviado).length > 0
+              ? '\n\nRecordatorios pendientes:\n' + agente.recordatorios.filter(r=>!r.enviado).map(r => `• ${r.texto} (${new Date(r.timestamp).toLocaleString('es-MX',{timeZone:'America/Mexico_City'})})`).join('\n')
+              : '';
+
+            const systemPrompt = `Eres un agente IA personal de Cristian, dueño de Infomaster/SOS Digital en México. 
+Fecha y hora actual: ${ahoraMX}
+Eres su asistente personal de confianza: respondes con claridad, eres directo, usas español informal.
+Puedes ayudar con: recordatorios, notas, ideas, análisis, redacción, dudas técnicas, lo que sea.
+
+Cuando el usuario pida un recordatorio, responde con JSON al final así:
+{"accion":"recordatorio","texto":"descripción","minutos":N}
+
+Cuando el usuario quiera que recuerdes algo de él, responde con JSON al final así:
+{"accion":"memoria","dato":"lo que hay que recordar"}
+
+Cuando el usuario pida ver sus recordatorios o memoria, muéstralos.
+${memoriaStr}${recordatoriosStr}`;
+
+            const messages = [
+              { role: 'system', content: systemPrompt },
+              ...histReciente.map(h => ({ role: h.rol, content: h.texto })),
+              { role: 'user', content: texto }
+            ];
+
+            const res = await fetch('https://api.openai.com/v1/chat/completions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_KEY}` },
+              body: JSON.stringify({ model: 'gpt-4o-mini', messages, max_tokens: 600 })
+            });
+            const data = await res.json();
+            let respuesta = data.choices?.[0]?.message?.content || '❌ Sin respuesta';
+
+            // Procesar acciones del agente
+            const jsonMatch = respuesta.match(/\{[^}]*"accion"\s*:\s*"(recordatorio|memoria)"[^}]*\}/s);
+            if (jsonMatch) {
+              try {
+                const accion = JSON.parse(jsonMatch[0]);
+                if (accion.accion === 'recordatorio' && accion.minutos) {
+                  agente.recordatorios.push({
+                    id: Date.now(),
+                    texto: accion.texto,
+                    timestamp: Date.now() + accion.minutos * 60000,
+                    enviado: false
+                  });
+                  // Programar envío
+                  setTimeout(async () => {
+                    try {
+                      const ag = JSON.parse(fs.readFileSync(AGENTE_FILE, 'utf8'));
+                      const r = ag.recordatorios.find(r => r.id === accion.id && !r.enviado);
+                      if (r) {
+                        await s.sock.sendMessage(selfJid, { text: `⏰ *Recordatorio:* ${accion.texto}` });
+                        r.enviado = true;
+                        fs.writeFileSync(AGENTE_FILE, JSON.stringify(ag, null, 2));
+                      }
+                    } catch(e) {}
+                  }, accion.minutos * 60000);
+                } else if (accion.accion === 'memoria' && accion.dato) {
+                  if (!agente.memoria.includes(accion.dato)) agente.memoria.push(accion.dato);
+                }
+                respuesta = respuesta.replace(jsonMatch[0], '').trim();
+              } catch(e) {}
+            }
+
+            // Guardar historial
+            agente.historial.push({ rol: 'user', texto });
+            agente.historial.push({ rol: 'assistant', texto: respuesta });
+            if (agente.historial.length > 100) agente.historial = agente.historial.slice(-100);
+            fs.mkdirSync(path.dirname(AGENTE_FILE), { recursive: true });
+            fs.writeFileSync(AGENTE_FILE, JSON.stringify(agente, null, 2));
+
+            await s.sock.sendMessage(selfJid, { text: respuesta });
+            console.log(`[personal] 🤖 Agente respondió a: "${texto.substring(0,50)}"`);
+
+          } catch(e) {
+            console.error('[personal] ❌ Error agente:', e.message);
+            try { await s.sock.sendMessage(selfJid, { text: '❌ Error del agente: ' + e.message }); } catch(_) {}
           }
         }
+
         continue;
       }
 
