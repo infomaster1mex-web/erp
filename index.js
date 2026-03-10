@@ -1087,7 +1087,7 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}`;
                   const mins = parseInt(accion.minutos) || 0;
                   const enviar = async () => {
                     try {
-                      await s.sock.sendMessage(destJid, { text: accion.mensaje });
+                      await s.sock.sendMessage(destJid, { text: accion.mensaje + ' 🤖' });
                       await s.sock.sendMessage(selfJid, { text: `✅ Mensaje enviado a ${accion.telefono}${mins > 0 ? ` (programado ${mins} min)` : ''}` });
                       console.log(`[personal] 📤 Mensaje enviado a ${accion.telefono}`);
                     } catch(e) {
@@ -1097,7 +1097,12 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}`;
                   if (mins > 0) setTimeout(enviar, mins * 60000);
                   else await enviar();
                 }
-                respuesta = respuesta.replace(jsonMatch[0], '').trim();
+                respuesta = respuesta
+                  .replace(jsonMatch[0], '')
+                  .replace(/```json[\s\S]*?```/g, '')
+                  .replace(/```[\s\S]*?```/g, '')
+                  .replace(/\bjson\b\s*/gi, '')
+                  .trim();
               } catch(e) {}
             }
 
