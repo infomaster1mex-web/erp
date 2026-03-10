@@ -911,6 +911,10 @@ async function conectarSesion(sesionId) {
         const tieneImagen = !!msg.message?.imageMessage;
         if (tieneImagen) {
           const msgId = msg.key.id;
+          const msgTs = (msg.messageTimestamp || 0) * 1000;
+          const ahoraMs = Date.now();
+          // Ignorar mensajes con más de 60 segundos de antigüedad (evita reprocess al reconectar)
+          if (ahoraMs - msgTs > 60000) { continue; }
           if (!s._processedIds) s._processedIds = new Set();
           if (s._processedIds.has(msgId)) continue;
           s._processedIds.add(msgId);
