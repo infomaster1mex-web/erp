@@ -2,6 +2,7 @@
 // index.js — SOS Digital WhatsApp Multi-Bot (Baileys)
 // Sesiones: avisos | campanas | grupos | respaldo1 | respaldo2 | personal
 // FIX: publicación de estado en sesión personal usa sesión con más contactos
+// FIX v2: soporte @lid + diagnóstico statusJidList
 // ═══════════════════════════════════════════════════════════════
 import makeWASocket, {
   useMultiFileAuthState,
@@ -438,6 +439,50 @@ async function generarImagen(prompt, modelo = null) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+//  FIX v2: Helper para construir statusJidList robusto
+//  Combina contactos @s.whatsapp.net + @lid de todas las sesiones
+// ══════════════════════════════════════════════════════════════
+function buildStatusJidList(sesionPublicadora, todasLasSesiones, SESIONES_ACTIVAS) {
+  const jidSet = new Set();
+  const lidSet = new Set();
+
+  // Agregar contactos de la sesión que publica
+  if (sesionPublicadora?.contactos) {
+    for (const j of sesionPublicadora.contactos) {
+      if (j.endsWith('@s.whatsapp.net')) jidSet.add(j);
+      else if (j.endsWith('@lid')) lidSet.add(j);
+    }
+  }
+
+  // Agregar contactos de TODAS las sesiones activas (no solo avisos)
+  for (const sid of SESIONES_ACTIVAS) {
+    const ss = todasLasSesiones[sid];
+    if (!ss?.contactos) continue;
+    for (const j of ss.contactos) {
+      if (j.endsWith('@s.whatsapp.net')) jidSet.add(j);
+      else if (j.endsWith('@lid')) lidSet.add(j);
+    }
+  }
+
+  // JID propio de la sesión publicadora (obligatorio para verse a sí mismo)
+  if (sesionPublicadora?.numero) {
+    jidSet.add(sesionPublicadora.numero.replace(/\D/g,'') + '@s.whatsapp.net');
+  }
+
+  // Combinar ambos formatos — Baileys acepta @lid en versiones recientes
+  const combined = [...Array.from(jidSet), ...Array.from(lidSet)].slice(0, 1000);
+
+  console.log(`[STATUS-JID] @s.whatsapp.net: ${jidSet.size} | @lid: ${lidSet.size} | total: ${combined.length}`);
+  if (combined.length <= 5) {
+    console.log(`[STATUS-JID] Muestra:`, combined);
+  } else {
+    console.log(`[STATUS-JID] Primeros 5:`, combined.slice(0, 5));
+  }
+
+  return combined;
+}
+
 async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn, videoBuffer = null, mediaType = null) {
 
   if (!mediaType) {
@@ -449,7 +494,9 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     const lines = ['📊 *Reporte SOS Digital*\n'];
     for (const [id, ss] of Object.entries(sesiones)) {
       const ico = ss.listo ? '🟢' : '🔴';
-      lines.push(`${ico} *${id}* — ${ss.listo ? '+'+ss.numero : 'Offline'} (${ss.contactos?.size||0} contactos)`);
+      const waCount = ss.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@s.whatsapp.net')).length : 0;
+      const lidCount = ss.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@lid')).length : 0;
+      lines.push(`${ico} *${id}* — ${ss.listo ? '+'+ss.numero : 'Offline'} (${waCount} wa + ${lidCount} lid contactos)`);
     }
     const schedules = cargarSchedules();
     if (schedules.length) {
@@ -635,9 +682,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
       for (const sid of targets) {
         try {
           const ss = sesiones[sid];
-          const jidSet = new Set(ss.contactos);
-          if (ss.numero) jidSet.add(ss.numero + '@s.whatsapp.net');
-          const statusJidList = Array.from(jidSet).slice(0, 1000);
+          // FIX v2: usar helper robusto para statusJidList
+          const statusJidList = buildStatusJidList(ss, sesiones, SESIONES_ACTIVAS);
           if (!statusJidList.length) { fail++; continue; }
 
           let payload;
@@ -648,10 +694,15 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
             payload = { image: mediaBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
           }
 
+          console.log(`[ESTADO] Publicando via sesión "${sid}" (${ss.numero}) con ${statusJidList.length} contactos`);
           await ss.sock.sendMessage('status@broadcast', payload, { statusJidList });
+          console.log(`[ESTADO] ✅ Publicado en "${sid}"`);
           ok++;
           await new Promise(r => setTimeout(r, 1500));
-        } catch(e) { fail++; }
+        } catch(e) {
+          console.error(`[ESTADO] ❌ Error en "${sid}":`, e.message);
+          fail++;
+        }
       }
       registrarPromoEnviada(caption, 'estado', ok);
       resultados.push(`✅ Estado: ${ok} sesiones OK, ${fail} fallidas`);
@@ -763,7 +814,7 @@ try { if (fs.existsSync(NOMBRES_FILE)) nombresCache = JSON.parse(fs.readFileSync
 
 function guardarNombre(jid, nombre) {
   if (!nombre || !jid) return;
-  const num = jid.replace('@s.whatsapp.net','').replace(/\D/g,'');
+  const num = jid.replace('@s.whatsapp.net','').replace('@lid','').replace(/\D/g,'');
   if (!nombresCache[num] || nombresCache[num] !== nombre) {
     nombresCache[num] = nombre;
     try { fs.mkdirSync(path.dirname(NOMBRES_FILE), {recursive:true}); fs.writeFileSync(NOMBRES_FILE, JSON.stringify(nombresCache, null, 2)); } catch(e) {}
@@ -788,6 +839,11 @@ async function conectarSesion(sesionId) {
 
   s.contactos = cargarContactos(sesionId);
   console.log(`[${sesionId}] Contactos cargados del disco: ${s.contactos.size}`);
+
+  // FIX v2: log de tipos de contactos al cargar
+  const waCount = Array.from(s.contactos).filter(j => j.endsWith('@s.whatsapp.net')).length;
+  const lidCount = Array.from(s.contactos).filter(j => j.endsWith('@lid')).length;
+  console.log(`[${sesionId}] Desglose: ${waCount} @s.whatsapp.net + ${lidCount} @lid`);
 
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version }          = await fetchLatestBaileysVersion();
@@ -834,16 +890,22 @@ async function conectarSesion(sesionId) {
     }
   });
 
+  // FIX v2: aceptar TANTO @s.whatsapp.net COMO @lid
   const addContactos = (jids) => {
     const antes = s.contactos.size;
     for (const jid of jids) {
-      if (jid && jid.endsWith('@s.whatsapp.net') && !jid.includes('status@broadcast')) {
+      if (!jid) continue;
+      if (jid.includes('status@broadcast')) continue;
+      // Aceptar ambos formatos
+      if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid')) {
         s.contactos.add(jid);
       }
     }
     if (s.contactos.size > antes) {
       guardarContactos(sesionId, s.contactos);
-      console.log(`[${sesionId}] contactos guardados: ${s.contactos.size}`);
+      const newWa = Array.from(s.contactos).filter(j => j.endsWith('@s.whatsapp.net')).length;
+      const newLid = Array.from(s.contactos).filter(j => j.endsWith('@lid')).length;
+      console.log(`[${sesionId}] contactos guardados: ${s.contactos.size} (${newWa} wa + ${newLid} lid)`);
     }
   };
 
@@ -882,8 +944,15 @@ async function conectarSesion(sesionId) {
         if (type !== 'notify') { continue; }
 
         const propioNum = s.numero ? s.numero.replace(/\D/g,'') : null;
-        const remoteNum = msg.key.remoteJid?.replace('@s.whatsapp.net','').replace(/\D/g,'');
-        if (!propioNum || remoteNum !== propioNum) { continue; }
+        const remoteJid = msg.key.remoteJid || '';
+        // FIX v2: comparar tanto con @s.whatsapp.net como con @lid
+        const remoteNum = remoteJid.replace('@s.whatsapp.net','').replace('@lid','').replace(/\D/g,'');
+        const esMensajeASiMismo = (
+          (propioNum && remoteNum === propioNum) ||
+          remoteJid === (propioNum + '@s.whatsapp.net') ||
+          remoteJid === (propioNum + '@lid')
+        );
+        if (!propioNum || !esMensajeASiMismo) { continue; }
 
         const msgId = msg.key.id;
         const msgTs = (msg.messageTimestamp || 0) * 1000;
@@ -934,24 +1003,10 @@ async function conectarSesion(sesionId) {
               try {
                 if (destino === 'estado' || destino === 'ambos') {
                   // ════════════════════════════════════════════════════
-                  // FIX: SIEMPRE postear via s.sock (personal).
-                  // Usar contactos de avisos SOLO para el statusJidList.
+                  // FIX v2: usar buildStatusJidList robusto
                   // ════════════════════════════════════════════════════
-                  const _sesAv = sesiones['avisos'];
-                  const _jidSet1 = new Set();
-                  // Agregar contactos de personal
-                  for (const j of (s.contactos || new Set())) {
-                    if (j.endsWith('@s.whatsapp.net')) _jidSet1.add(j);
-                  }
-                  // Agregar contactos de avisos (más completo)
-                  if (_sesAv?.contactos) {
-                    for (const j of _sesAv.contactos) {
-                      if (j.endsWith('@s.whatsapp.net')) _jidSet1.add(j);
-                    }
-                  }
-                  // JID propio de personal OBLIGATORIO (para verse a sí mismo)
-                  if (s.numero) _jidSet1.add(s.numero.replace(/\D/g,'') + '@s.whatsapp.net');
-                  const statusJidList = Array.from(_jidSet1).slice(0, 1000);
+                  const statusJidList = buildStatusJidList(s, sesiones, SESIONES_ACTIVAS);
+
                   if (statusJidList.length === 0) {
                     await s.sock.sendMessage(selfJid, { text: '⚠️ Sin contactos cargados todavía. Espera un momento y vuelve a intentarlo. 🤖' });
                     continue;
@@ -983,6 +1038,7 @@ async function conectarSesion(sesionId) {
                 }
                 await s.sock.sendMessage(selfJid, { text: `✅ Listo, imagen publicada en ${destino}. 🤖` });
               } catch(e) {
+                console.error(`[personal] ❌ Error publicando estado:`, e.message, e.stack?.split('\n')[1]);
                 await s.sock.sendMessage(selfJid, { text: `❌ Error: ${e.message} 🤖` });
               }
               continue;
@@ -1122,13 +1178,9 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                     const dest = accion.destino || 'estado';
                     if (dest === 'estado' || dest === 'ambos') {
                       try {
-                        // FIX: SIEMPRE postear via s.sock (personal). Contactos de avisos solo para statusJidList.
-                        const _sesAv2 = sesiones['avisos'];
-                        const _jidSet2 = new Set();
-                        for (const j of (s.contactos || new Set())) { if (j.endsWith('@s.whatsapp.net')) _jidSet2.add(j); }
-                        if (_sesAv2?.contactos) { for (const j of _sesAv2.contactos) { if (j.endsWith('@s.whatsapp.net')) _jidSet2.add(j); } }
-                        if (s.numero) _jidSet2.add(s.numero.replace(/\D/g,'') + '@s.whatsapp.net');
-                        const statusJidList = Array.from(_jidSet2).slice(0, 1000);
+                        // FIX v2: usar buildStatusJidList robusto
+                        const statusJidList = buildStatusJidList(s, sesiones, SESIONES_ACTIVAS);
+
                         if (statusJidList.length === 0) {
                           respuesta = '⚠️ Sin contactos cargados. Espera y vuelve a intentarlo. 🤖';
                         } else {
@@ -1141,7 +1193,9 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                           }, { statusJidList });
                           console.log(`[personal] ✅ Estado publicado en PERSONAL (${statusJidList.length} contactos)`);
                         }
-                      } catch(e) { console.error('[personal] ❌ Error estado:', e.message); }
+                      } catch(e) {
+                        console.error('[personal] ❌ Error estado:', e.message, e.stack?.split('\n')[1]);
+                      }
                     }
                     if (dest === 'grupos' || dest === 'ambos') {
                       try {
@@ -1438,6 +1492,23 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           continue;
         }
 
+        // FIX v2: nuevo comando !contactos para diagnóstico
+        if (textoCmds === '!contactos' || textoCmds === '!diagnostico') {
+          const lines = ['🔍 *Diagnóstico de contactos:*\n'];
+          for (const sid of SESIONES_ACTIVAS) {
+            const ss = sesiones[sid];
+            if (!ss) continue;
+            const waC = ss.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@s.whatsapp.net')).length : 0;
+            const lidC = ss.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@lid')).length : 0;
+            const otherC = ss.contactos ? ss.contactos.size - waC - lidC : 0;
+            lines.push(`${ss.listo?'🟢':'🔴'} *${sid}*: ${waC} wa + ${lidC} lid${otherC > 0 ? ' + '+otherC+' otros' : ''} = ${ss.contactos?.size || 0} total`);
+          }
+          const testJidList = buildStatusJidList(sesiones['personal'] || sesiones[SESIONES_ACTIVAS[0]], sesiones, SESIONES_ACTIVAS);
+          lines.push(`\n📊 *statusJidList combinado:* ${testJidList.length} contactos`);
+          await reply(lines.join('\n'));
+          continue;
+        }
+
         if (textoCmds.startsWith('!modelo')) {
           const partes = textoCmds.split(' ');
           const nuevoModelo = partes[1]?.toLowerCase();
@@ -1462,7 +1533,9 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
         if (!tieneMedia) {
           const ctxSesiones = SESIONES_ACTIVAS.map(id => {
             const ss = sesiones[id];
-            return `${id}: ${ss?.listo ? '🟢 conectado (+'+ss.numero+', '+ss.contactos?.size+' contactos)' : '🔴 offline'}`;
+            const waC = ss?.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@s.whatsapp.net')).length : 0;
+            const lidC = ss?.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@lid')).length : 0;
+            return `${id}: ${ss?.listo ? '🟢 conectado (+'+ss.numero+', '+waC+' wa + '+lidC+' lid contactos)' : '🔴 offline'}`;
           }).join('\n');
 
           console.log(`[AGENTE] Admin: "${texto}" imagen=false video=false`);
@@ -1566,8 +1639,10 @@ app.get('/', (req, res) => {
       statusBadge = `<span class="badge" style="background:rgba(100,100,100,.2);color:#888">⏸ Desactivada</span>`;
       extra = `<div class="numero" style="font-size:.65rem;color:#555">Agregar "${id}" a SESIONES_ACTIVAS</div>`;
     } else if (s.listo) {
+      const waC = s.contactos ? Array.from(s.contactos).filter(j => j.endsWith('@s.whatsapp.net')).length : 0;
+      const lidC = s.contactos ? Array.from(s.contactos).filter(j => j.endsWith('@lid')).length : 0;
       statusBadge = `<span class="badge badge-on">✅ Conectado</span>`;
-      extra = `<div class="numero">+${s.numero || '—'}</div>`;
+      extra = `<div class="numero">+${s.numero || '—'} (${waC} wa + ${lidC} lid)</div>`;
     } else if (s.qr) {
       statusBadge = `<span class="badge badge-qr">📱 Escanea QR</span>`;
       extra = `<img class="qr-img" src="${s.qr}" alt="QR ${id}">`;
@@ -1844,6 +1919,7 @@ app.post('/estado/publicar', auth, async (req, res) => {
       addContactos(sesion, Array.from(jidSet));
     }
 
+    // FIX v2: incluir ambos formatos desde contactos
     for (const jid of s.contactos) jidSet.add(jid);
 
     const propioJid = s.numero ? s.numero + '@s.whatsapp.net' : null;
@@ -1883,7 +1959,8 @@ function addContactos(sesionId, jids) {
   if (!s) return;
   const antes = s.contactos.size;
   for (const jid of jids) {
-    if (jid && jid.endsWith('@s.whatsapp.net')) s.contactos.add(jid);
+    // FIX v2: aceptar ambos formatos
+    if (jid && (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid'))) s.contactos.add(jid);
   }
   if (s.contactos.size > antes) guardarContactos(sesionId, s.contactos);
 }
