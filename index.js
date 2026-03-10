@@ -904,6 +904,44 @@ async function conectarSesion(sesionId) {
     addContactos(messages.map(m => m.key?.remoteJid).filter(Boolean));
 
     for (const msg of messages) {
+      // ══════════════════════════════════════════════
+      //  SESIÓN PERSONAL — auto-publicar estado al mandarse imagen a sí mismo
+      // ══════════════════════════════════════════════
+      if (msg.key.fromMe && sesionId === 'personal') {
+        const tieneImagen = !!msg.message?.imageMessage;
+        if (tieneImagen) {
+          try {
+            const caption = msg.message.imageMessage?.caption || '';
+            const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+            const imgBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
+              logger: pino({ level: 'silent' }),
+              reuploadRequest: s.sock.updateMediaMessage
+            });
+            if (imgBuffer && imgBuffer.length > 1000) {
+              // Publicar como estado
+              const contactos = Array.from(s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
+              const propioJid = s.numero ? s.numero + '@s.whatsapp.net' : null;
+              if (propioJid) contactos.push(propioJid);
+              const statusJidList = [...new Set(contactos)].slice(0, 1000);
+
+              await s.sock.sendMessage('status@broadcast', {
+                image: imgBuffer,
+                caption: caption || undefined,
+                mimetype: 'image/jpeg'
+              }, { statusJidList });
+
+              console.log(`[personal] ✅ Estado publicado desde auto-mensaje (${statusJidList.length} contactos)`);
+              // Confirmar en el mismo chat
+              await s.sock.sendMessage(msg.key.remoteJid, { text: `✅ Estado publicado${caption ? ': ' + caption : ''} (${statusJidList.length} contactos)` });
+            }
+          } catch(e) {
+            console.error('[personal] ❌ Error publicando estado:', e.message);
+            try { await s.sock.sendMessage(msg.key.remoteJid, { text: '❌ Error al publicar estado: ' + e.message }); } catch(_) {}
+          }
+        }
+        continue;
+      }
+
       if (msg.key.fromMe) continue;
       if (!msg.message) continue;
       const fromJid = msg.key.remoteJid;
@@ -1657,44 +1695,6 @@ function addContactos(sesionId, jids) {
   }
   if (s.contactos.size > antes) guardarContactos(sesionId, s.contactos);
 }
-
-// ═══════════════════════════════════════════════════════════════
-//  FOTO DE PERFIL — para CRM Hub
-// ═══════════════════════════════════════════════════════════════
-// GET /perfil/foto?telefono=5214961399533&sesion=avisos
-// Devuelve la foto de perfil como imagen (o JSON con error)
-app.get('/perfil/foto', auth, async (req, res) => {
-  const { telefono, sesion } = req.query;
-
-  if (!telefono || !sesion) {
-    return res.json({ success: false, message: 'Faltan parámetros: telefono, sesion' });
-  }
-
-  const s = sesiones[sesion];
-  if (!s) return res.json({ success: false, message: `Sesión "${sesion}" no existe` });
-  if (!s.listo) return res.json({ success: false, message: `Sesión "${sesion}" no conectada` });
-
-  try {
-    const jid = telefono.replace(/\D/g, '') + '@s.whatsapp.net';
-    const url = await s.sock.profilePictureUrl(jid, 'image');
-
-    if (!url) return res.json({ success: false, message: 'Sin foto de perfil disponible' });
-
-    // Descargar imagen y reenviarla como buffer
-    const imgRes = await fetch(url);
-    if (!imgRes.ok) return res.json({ success: false, message: 'No se pudo descargar la imagen' });
-
-    const buffer = Buffer.from(await imgRes.arrayBuffer());
-    res.set('Content-Type', 'image/jpeg');
-    res.set('Cache-Control', 'public, max-age=3600');
-    res.send(buffer);
-
-  } catch (err) {
-    // profilePictureUrl lanza error si el número no tiene foto o está restringido
-    console.error(`[perfil/foto] Error: ${err.message}`);
-    res.json({ success: false, message: err.message || 'Sin foto disponible' });
-  }
-});
 
 // ═══════════════════════════════════════════════════════════════
 //  ARRANCAR TODAS LAS SESIONES
