@@ -996,6 +996,9 @@ async function conectarSesion(sesionId) {
             const contactosConocidos = Object.entries(nombresCache).slice(0, 50)
               .map(([num, nom]) => `${nom}: ${num}`).join('\n');
             const contactosStr = contactosConocidos ? `\n\nContactos conocidos:\n${contactosConocidos}` : '';
+            const pendingImgStr = (s._pendingImg && Date.now() - s._pendingImg.ts < 300000)
+              ? '\n\n⚠️ HAY UNA IMAGEN PENDIENTE esperando instrucción. Si el usuario dice "estado", "grupos", "ambos" o menciona una persona, responde con {"accion":"usar_imagen","destino":"estado|grupos|ambos|persona"} inmediatamente.'
+              : '';
 
             // Verificar recordatorios pendientes
             const ahora = Date.now();
@@ -1044,7 +1047,7 @@ Cuando el usuario pida CANCELAR un mensaje programado, responde con JSON al fina
 (id null cancela el último pendiente)
 
 Cuando el usuario pida ver sus recordatorios o memoria, muéstralos.
-${memoriaStr}${recordatoriosStr}${contactosStr}`;
+${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
 
             const messages = [
               { role: 'system', content: systemPrompt },
