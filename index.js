@@ -957,7 +957,7 @@ async function conectarSesion(sesionId) {
 
         const selfJid = msg.key.remoteJid;
 
-        // ── IMAGEN → publicar estado ─────────────────────────────
+        // ── IMAGEN → preguntar qué hacer ─────────────────────────
         if (tieneImagen) {
           try {
             const caption = msg.message.imageMessage?.caption || '';
@@ -967,18 +967,15 @@ async function conectarSesion(sesionId) {
               reuploadRequest: s.sock.updateMediaMessage
             });
             if (imgBuffer && imgBuffer.length > 1000) {
-              // Publicar estado desde sesión "avisos" para que lo vean los contactos reales
-              const sesionEstado = sesiones['avisos'] || s;
-              const contactos = Array.from(sesionEstado.contactos || s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
-              const propioJid = s.numero ? s.numero + '@s.whatsapp.net' : null;
-              if (propioJid) contactos.push(propioJid);
-              const statusJidList = [...new Set(contactos)].slice(0, 1000);
-              await sesionEstado.sock.sendMessage('status@broadcast', {
-                image: imgBuffer, caption: caption || undefined, mimetype: 'image/jpeg'
-              }, { statusJidList });
-              console.log(`[personal] ✅ Estado publicado via avisos (${statusJidList.length} contactos) msgId=${msgId}`);
+              // Guardar imagen temporalmente para usar después
+              if (!s._pendingImg) s._pendingImg = {};
+              s._pendingImg = { buffer: imgBuffer, caption, ts: Date.now() };
+              await s.sock.sendMessage(selfJid, {
+                text: `📸 Imagen lista. ¿Qué hago con ella?\n\n1️⃣ *Estado* — publicar en mi estado de WhatsApp\n2️⃣ *Grupos* — mandar a todos los grupos\n3️⃣ *Ambos* — estado y grupos\n4️⃣ *Persona* — mandarla a alguien específico\n\nResponde con una opción 🤖`
+              });
+              console.log(`[personal] 📸 Imagen recibida, esperando instrucción`);
             }
-          } catch(e) { console.error('[personal] ❌ Error estado:', e.message); }
+          } catch(e) { console.error('[personal] ❌ Error imagen:', e.message); }
         }
 
         // ── TEXTO → Agente IA personal ───────────────────────────
@@ -1039,6 +1036,13 @@ Cuando el usuario pida MANDARLE un mensaje a otra persona (ahora o programado), 
 Si pide enviarlo en X minutos, pon minutos=X. Si no tienes el teléfono, búscalo en los contactos conocidos. Si no está, pregunta.
 NUNCA uses "recordatorio" para mensajes a terceros, siempre usa "enviar_mensaje".
 
+Cuando el usuario responda qué hacer con la imagen pendiente (estado/grupos/ambos/persona), responde con JSON al final así:
+{"accion":"usar_imagen","destino":"estado|grupos|ambos|persona","telefono":"521XXXXXXXXXX (solo si destino=persona)"}
+
+Cuando el usuario pida CANCELAR un mensaje programado, responde con JSON al final así:
+{"accion":"cancelar_mensaje","id":null}
+(id null cancela el último pendiente)
+
 Cuando el usuario pida ver sus recordatorios o memoria, muéstralos.
 ${memoriaStr}${recordatoriosStr}${contactosStr}`;
 
@@ -1057,7 +1061,7 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}`;
             let respuesta = data.choices?.[0]?.message?.content || '❌ Sin respuesta';
 
             // Procesar acciones del agente
-            const jsonMatch = respuesta.match(/\{[^}]*"accion"\s*:\s*"(recordatorio|memoria|enviar_mensaje)"[^}]*\}/s);
+            const jsonMatch = respuesta.match(/\{[^}]*"accion"\s*:\s*"(recordatorio|memoria|enviar_mensaje|cancelar_mensaje|usar_imagen)"[^}]*\}/s);
             if (jsonMatch) {
               try {
                 const accion = JSON.parse(jsonMatch[0]);
@@ -1085,7 +1089,9 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}`;
                 } else if (accion.accion === 'enviar_mensaje' && accion.telefono && accion.mensaje) {
                   const destJid = accion.telefono.replace(/\D/g,'') + '@s.whatsapp.net';
                   const mins = parseInt(accion.minutos) || 0;
+                  const timerId = `msg_${Date.now()}`;
                   const enviar = async () => {
+                    timersActivos.delete(timerId);
                     try {
                       await s.sock.sendMessage(destJid, { text: accion.mensaje + ' 🤖' });
                       await s.sock.sendMessage(selfJid, { text: `✅ Mensaje enviado a ${accion.telefono}${mins > 0 ? ` (programado ${mins} min)` : ''}` });
@@ -1094,9 +1100,67 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}`;
                       await s.sock.sendMessage(selfJid, { text: `❌ Error enviando a ${accion.telefono}: ${e.message}` });
                     }
                   };
-                  if (mins > 0) setTimeout(enviar, mins * 60000);
-                  else await enviar();
-                }
+                  if (mins > 0) {
+                    const t = setTimeout(enviar, mins * 60000);
+                    timersActivos.set(timerId, t);
+                    // Guardar en agente para poder cancelar
+                    if (!agente.pendientes) agente.pendientes = [];
+                    agente.pendientes.push({ id: timerId, telefono: accion.telefono, mensaje: accion.mensaje, expira: Date.now() + mins * 60000 });
+                  } else await enviar();
+                } else if (accion.accion === 'usar_imagen') {
+                  const img = s._pendingImg;
+                  if (!img || Date.now() - img.ts > 300000) {
+                    respuesta = 'No hay imagen pendiente (expiró o no se envió). Manda la imagen de nuevo. 🤖';
+                  } else {
+                    const dest = accion.destino || 'estado';
+                    if (dest === 'estado' || dest === 'ambos') {
+                      try {
+                        const sesionEstado = sesiones['avisos'] || s;
+                        const contactos = Array.from(sesionEstado.contactos || s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
+                        const statusJidList = [...new Set(contactos)].slice(0, 1000);
+                        await sesionEstado.sock.sendMessage('status@broadcast', {
+                          image: img.buffer, caption: img.caption || undefined, mimetype: 'image/jpeg'
+                        }, { statusJidList });
+                        console.log(`[personal] ✅ Estado publicado via avisos (${statusJidList.length} contactos)`);
+                      } catch(e) { console.error('[personal] ❌ Error estado:', e.message); }
+                    }
+                    if (dest === 'grupos' || dest === 'ambos') {
+                      try {
+                        const sg = sesiones['grupos'] || sesiones['avisos'];
+                        if (sg?.listo) {
+                          const groups = await sg.sock.groupFetchAllParticipating();
+                          const gids = Object.keys(groups);
+                          let ok = 0;
+                          for (const gid of gids) {
+                            try {
+                              await sg.sock.sendMessage(gid, { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) });
+                              ok++;
+                              await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
+                            } catch(e) {}
+                          }
+                          console.log(`[personal] ✅ Imagen enviada a ${ok} grupos`);
+                        }
+                      } catch(e) { console.error('[personal] ❌ Error grupos:', e.message); }
+                    }
+                    if (dest === 'persona' && accion.telefono) {
+                      try {
+                        const destJid = accion.telefono.replace(/\D/g,'') + '@s.whatsapp.net';
+                        await s.sock.sendMessage(destJid, { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) });
+                      } catch(e) { console.error('[personal] ❌ Error persona:', e.message); }
+                    }
+                    s._pendingImg = null;
+                  }
+                } else if (accion.accion === 'cancelar_mensaje') {
+                  // Cancelar último mensaje pendiente o por id
+                  if (!agente.pendientes) agente.pendientes = [];
+                  const pendiente = accion.id
+                    ? agente.pendientes.find(p => p.id === accion.id)
+                    : agente.pendientes[agente.pendientes.length - 1];
+                  if (pendiente && timersActivos.has(pendiente.id)) {
+                    clearTimeout(timersActivos.get(pendiente.id));
+                    timersActivos.delete(pendiente.id);
+                    agente.pendientes = agente.pendientes.filter(p => p.id !== pendiente.id);
+                  }
                 respuesta = respuesta
                   .replace(jsonMatch[0], '')
                   .replace(/```json[\s\S]*?```/g, '')
