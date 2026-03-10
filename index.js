@@ -1062,9 +1062,16 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
             });
             const data = await res.json();
             let respuesta = data.choices?.[0]?.message?.content || '❌ Sin respuesta';
+            console.log(`[personal] 🧠 GPT raw: ${respuesta.substring(0, 200)}`);
 
             // Procesar acciones del agente
-            const jsonMatch = respuesta.match(/\{[^}]*"accion"\s*:\s*"(recordatorio|memoria|enviar_mensaje|cancelar_mensaje|usar_imagen)"[^}]*\}/s);
+            // Extraer JSON de acción del agente
+            let jsonMatch = null;
+            try {
+              const jsonRegex = /\{(?:[^{}]|\{[^{}]*\})*"accion"\s*:\s*"(recordatorio|memoria|enviar_mensaje|cancelar_mensaje|usar_imagen)"(?:[^{}]|\{[^{}]*\})*\}/gs;
+              const matches = [...respuesta.matchAll(jsonRegex)];
+              if (matches.length > 0) jsonMatch = [matches[0][0], matches[0][1]];
+            } catch(e) {}
             if (jsonMatch) {
               try {
                 const accion = JSON.parse(jsonMatch[0]);
