@@ -1681,7 +1681,6 @@ app.get('/perfil/foto', auth, async (req, res) => {
     if (!url) return res.json({ success: false, message: 'Sin foto de perfil disponible' });
 
     // Descargar imagen y reenviarla como buffer
-    const fetch = (await import('node-fetch')).default;
     const imgRes = await fetch(url);
     if (!imgRes.ok) return res.json({ success: false, message: 'No se pudo descargar la imagen' });
 
