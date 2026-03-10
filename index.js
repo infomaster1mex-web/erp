@@ -807,6 +807,28 @@ function guardarContactos(sesionId, contactSet) {
   } catch(e) {}
 }
 
+// ── Helpers para nombres de contactos ───────────────────────
+const NOMBRES_FILE = path.join(__dirname, 'auth_info', 'personal', 'nombres_cache.json');
+let nombresCache = {};
+try { if (fs.existsSync(NOMBRES_FILE)) nombresCache = JSON.parse(fs.readFileSync(NOMBRES_FILE, 'utf8')); } catch(e) {}
+
+function guardarNombre(jid, nombre) {
+  if (!nombre || !jid) return;
+  const num = jid.replace('@s.whatsapp.net','').replace(/\D/g,'');
+  if (!nombresCache[num] || nombresCache[num] !== nombre) {
+    nombresCache[num] = nombre;
+    try { fs.mkdirSync(path.dirname(NOMBRES_FILE), {recursive:true}); fs.writeFileSync(NOMBRES_FILE, JSON.stringify(nombresCache, null, 2)); } catch(e) {}
+  }
+}
+
+function buscarContactoPorNombre(nombre) {
+  const q = nombre.toLowerCase();
+  for (const [num, nom] of Object.entries(nombresCache)) {
+    if (nom.toLowerCase().includes(q)) return { num, nombre: nom };
+  }
+  return null;
+}
+
 // ── Crear/conectar una sesión ────────────────────────────────
 async function conectarSesion(sesionId) {
   const cfg  = SESIONES_CONFIG[sesionId];
@@ -896,12 +918,19 @@ async function conectarSesion(sesionId) {
   // contacts.upsert — refuerzo
   s.sock.ev.on('contacts.upsert', (contacts) => {
     addContactos(contacts.map(c => c.id || c.notify).filter(Boolean));
+    // Guardar nombres si es sesión personal
+    if (sesionId === 'personal') {
+      contacts.forEach(c => { if (c.id && (c.name || c.notify)) guardarNombre(c.id, c.name || c.notify); });
+    }
   });
 
   // ── Listener ÚNICO: acumula contactos + comandos + auto-reply ──
   s.sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // 1) Siempre acumular contactos
+    // 1) Siempre acumular contactos + nombres
     addContactos(messages.map(m => m.key?.remoteJid).filter(Boolean));
+    if (sesionId === 'personal') {
+      messages.forEach(m => { if (!m.key.fromMe && m.pushName && m.key.remoteJid) guardarNombre(m.key.remoteJid, m.pushName); });
+    }
 
     for (const msg of messages) {
       // ══════════════════════════════════════════════
@@ -912,6 +941,11 @@ async function conectarSesion(sesionId) {
         const tieneTexto  = !!(msg.message?.conversation || msg.message?.extendedTextMessage?.text);
 
         if (type !== 'notify') { continue; }
+
+        // Solo procesar mensajes en el chat propio (Tú)
+        const propioNum = s.numero ? s.numero.replace(/\D/g,'') : null;
+        const remoteNum = msg.key.remoteJid?.replace('@s.whatsapp.net','').replace(/\D/g,'');
+        if (!propioNum || remoteNum !== propioNum) { continue; }
 
         const msgId = msg.key.id;
         const msgTs = (msg.messageTimestamp || 0) * 1000;
@@ -933,14 +967,16 @@ async function conectarSesion(sesionId) {
               reuploadRequest: s.sock.updateMediaMessage
             });
             if (imgBuffer && imgBuffer.length > 1000) {
-              const contactos = Array.from(s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
+              // Publicar estado desde sesión "avisos" para que lo vean los contactos reales
+              const sesionEstado = sesiones['avisos'] || s;
+              const contactos = Array.from(sesionEstado.contactos || s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
               const propioJid = s.numero ? s.numero + '@s.whatsapp.net' : null;
               if (propioJid) contactos.push(propioJid);
               const statusJidList = [...new Set(contactos)].slice(0, 1000);
-              await s.sock.sendMessage('status@broadcast', {
+              await sesionEstado.sock.sendMessage('status@broadcast', {
                 image: imgBuffer, caption: caption || undefined, mimetype: 'image/jpeg'
               }, { statusJidList });
-              console.log(`[personal] ✅ Estado publicado (${statusJidList.length} contactos) msgId=${msgId}`);
+              console.log(`[personal] ✅ Estado publicado via avisos (${statusJidList.length} contactos) msgId=${msgId}`);
             }
           } catch(e) { console.error('[personal] ❌ Error estado:', e.message); }
         }
@@ -958,6 +994,11 @@ async function conectarSesion(sesionId) {
 
             // Hora actual México
             const ahoraMX = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City', dateStyle: 'full', timeStyle: 'short' });
+
+            // Lista de contactos conocidos
+            const contactosConocidos = Object.entries(nombresCache).slice(0, 50)
+              .map(([num, nom]) => `${nom}: ${num}`).join('\n');
+            const contactosStr = contactosConocidos ? `\n\nContactos conocidos:\n${contactosConocidos}` : '';
 
             // Verificar recordatorios pendientes
             const ahora = Date.now();
@@ -984,16 +1025,22 @@ async function conectarSesion(sesionId) {
             const systemPrompt = `Eres un agente IA personal de Cristian, dueño de Infomaster/SOS Digital en México. 
 Fecha y hora actual: ${ahoraMX}
 Eres su asistente personal de confianza: respondes con claridad, eres directo, usas español informal.
+Siempre termina tus respuestas con el emoji 🤖 al final.
 Puedes ayudar con: recordatorios, notas, ideas, análisis, redacción, dudas técnicas, lo que sea.
 
-Cuando el usuario pida un recordatorio, responde con JSON al final así:
-{"accion":"recordatorio","texto":"descripción","minutos":N}
+Cuando el usuario pida un recordatorio (algo que le debes AVISAR a él), responde con JSON al final así:
+{"accion":"recordatorio","texto":"descripción del recordatorio","minutos":N}
 
 Cuando el usuario quiera que recuerdes algo de él, responde con JSON al final así:
 {"accion":"memoria","dato":"lo que hay que recordar"}
 
+Cuando el usuario pida MANDARLE un mensaje a otra persona (ahora o programado), usa SIEMPRE enviar_mensaje:
+{"accion":"enviar_mensaje","telefono":"521XXXXXXXXXX","mensaje":"texto exacto a enviar","minutos":0}
+Si pide enviarlo en X minutos, pon minutos=X. Si no tienes el teléfono, búscalo en los contactos conocidos. Si no está, pregunta.
+NUNCA uses "recordatorio" para mensajes a terceros, siempre usa "enviar_mensaje".
+
 Cuando el usuario pida ver sus recordatorios o memoria, muéstralos.
-${memoriaStr}${recordatoriosStr}`;
+${memoriaStr}${recordatoriosStr}${contactosStr}`;
 
             const messages = [
               { role: 'system', content: systemPrompt },
@@ -1010,7 +1057,7 @@ ${memoriaStr}${recordatoriosStr}`;
             let respuesta = data.choices?.[0]?.message?.content || '❌ Sin respuesta';
 
             // Procesar acciones del agente
-            const jsonMatch = respuesta.match(/\{[^}]*"accion"\s*:\s*"(recordatorio|memoria)"[^}]*\}/s);
+            const jsonMatch = respuesta.match(/\{[^}]*"accion"\s*:\s*"(recordatorio|memoria|enviar_mensaje)"[^}]*\}/s);
             if (jsonMatch) {
               try {
                 const accion = JSON.parse(jsonMatch[0]);
@@ -1035,6 +1082,20 @@ ${memoriaStr}${recordatoriosStr}`;
                   }, accion.minutos * 60000);
                 } else if (accion.accion === 'memoria' && accion.dato) {
                   if (!agente.memoria.includes(accion.dato)) agente.memoria.push(accion.dato);
+                } else if (accion.accion === 'enviar_mensaje' && accion.telefono && accion.mensaje) {
+                  const destJid = accion.telefono.replace(/\D/g,'') + '@s.whatsapp.net';
+                  const mins = parseInt(accion.minutos) || 0;
+                  const enviar = async () => {
+                    try {
+                      await s.sock.sendMessage(destJid, { text: accion.mensaje });
+                      await s.sock.sendMessage(selfJid, { text: `✅ Mensaje enviado a ${accion.telefono}${mins > 0 ? ` (programado ${mins} min)` : ''}` });
+                      console.log(`[personal] 📤 Mensaje enviado a ${accion.telefono}`);
+                    } catch(e) {
+                      await s.sock.sendMessage(selfJid, { text: `❌ Error enviando a ${accion.telefono}: ${e.message}` });
+                    }
+                  };
+                  if (mins > 0) setTimeout(enviar, mins * 60000);
+                  else await enviar();
                 }
                 respuesta = respuesta.replace(jsonMatch[0], '').trim();
               } catch(e) {}
