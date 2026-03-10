@@ -899,7 +899,7 @@ async function conectarSesion(sesionId) {
   });
 
   // ── Listener ÚNICO: acumula contactos + comandos + auto-reply ──
-  s.sock.ev.on('messages.upsert', async ({ messages }) => {
+  s.sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // 1) Siempre acumular contactos
     addContactos(messages.map(m => m.key?.remoteJid).filter(Boolean));
 
@@ -909,7 +909,7 @@ async function conectarSesion(sesionId) {
       // ══════════════════════════════════════════════
       if (msg.key.fromMe && sesionId === 'personal') {
         const tieneImagen = !!msg.message?.imageMessage;
-        if (tieneImagen) {
+        if (tieneImagen && type === 'notify') {
           const msgId = msg.key.id;
           const msgTs = (msg.messageTimestamp || 0) * 1000;
           const ahoraMs = Date.now();
@@ -942,13 +942,11 @@ async function conectarSesion(sesionId) {
                 mimetype: 'image/jpeg'
               }, { statusJidList });
 
-              console.log(`[personal] ✅ Estado publicado desde auto-mensaje (${statusJidList.length} contactos)`);
-              // Confirmar en el mismo chat
-              await s.sock.sendMessage(msg.key.remoteJid, { text: `✅ Estado publicado${caption ? ': ' + caption : ''} (${statusJidList.length} contactos)` });
+              console.log(`[personal] ✅ Estado publicado (${statusJidList.length} contactos) msgId=${msgId}`);
             }
           } catch(e) {
             console.error('[personal] ❌ Error publicando estado:', e.message);
-            try { await s.sock.sendMessage(msg.key.remoteJid, { text: '❌ Error al publicar estado: ' + e.message }); } catch(_) {}
+
           }
         }
         continue;
