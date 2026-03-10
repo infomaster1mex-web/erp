@@ -910,6 +910,14 @@ async function conectarSesion(sesionId) {
       if (msg.key.fromMe && sesionId === 'personal') {
         const tieneImagen = !!msg.message?.imageMessage;
         if (tieneImagen) {
+          const msgId = msg.key.id;
+          if (!s._processedIds) s._processedIds = new Set();
+          if (s._processedIds.has(msgId)) continue;
+          s._processedIds.add(msgId);
+          if (s._processedIds.size > 200) {
+            const first = s._processedIds.values().next().value;
+            s._processedIds.delete(first);
+          }
           try {
             const caption = msg.message.imageMessage?.caption || '';
             const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
