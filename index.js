@@ -934,23 +934,36 @@ async function conectarSesion(sesionId) {
               try {
                 if (destino === 'estado' || destino === 'ambos') {
                   // ════════════════════════════════════════════════════
-                  // FIX: elegir la sesión con más contactos cargados
+                  // FIX: SIEMPRE postear via s.sock (personal).
+                  // Usar contactos de avisos SOLO para el statusJidList.
                   // ════════════════════════════════════════════════════
                   const _sesAv = sesiones['avisos'];
-                  const _ctAv = (_sesAv?.listo ? (_sesAv.contactos?.size || 0) : 0);
-                  const _ctPe = s.contactos?.size || 0;
-                  const sesionEstado = (_ctAv >= _ctPe && _sesAv?.listo) ? _sesAv : s;
-                  const contactos = Array.from(sesionEstado.contactos || new Set()).filter(j => j.endsWith('@s.whatsapp.net'));
-                  const statusJidList = [...new Set(contactos)].slice(0, 1000);
+                  const _jidSet1 = new Set();
+                  // Agregar contactos de personal
+                  for (const j of (s.contactos || new Set())) {
+                    if (j.endsWith('@s.whatsapp.net')) _jidSet1.add(j);
+                  }
+                  // Agregar contactos de avisos (más completo)
+                  if (_sesAv?.contactos) {
+                    for (const j of _sesAv.contactos) {
+                      if (j.endsWith('@s.whatsapp.net')) _jidSet1.add(j);
+                    }
+                  }
+                  // JID propio de personal OBLIGATORIO (para verse a sí mismo)
+                  if (s.numero) _jidSet1.add(s.numero.replace(/\D/g,'') + '@s.whatsapp.net');
+                  const statusJidList = Array.from(_jidSet1).slice(0, 1000);
                   if (statusJidList.length === 0) {
                     await s.sock.sendMessage(selfJid, { text: '⚠️ Sin contactos cargados todavía. Espera un momento y vuelve a intentarlo. 🤖' });
                     continue;
                   }
-                  console.log(`[personal] Publicando estado via '${sesionEstado === s ? 'personal' : 'avisos'}' con ${statusJidList.length} contactos`);
-                  await sesionEstado.sock.sendMessage('status@broadcast', {
-                    image: img.buffer, caption: img.caption || undefined, mimetype: 'image/jpeg'
+                  console.log(`[personal] Publicando estado en cuenta PERSONAL con ${statusJidList.length} contactos (${s.numero})`);
+                  const isJpeg1 = img.buffer[0]===0xFF && img.buffer[1]===0xD8;
+                  await s.sock.sendMessage('status@broadcast', {
+                    image: img.buffer,
+                    mimetype: isJpeg1 ? 'image/jpeg' : 'image/png',
+                    ...(img.caption ? { caption: img.caption } : {}),
                   }, { statusJidList });
-                  console.log(`[personal] ✅ Estado publicado (${statusJidList.length} contactos)`);
+                  console.log(`[personal] ✅ Estado publicado en PERSONAL (${statusJidList.length} contactos)`);
                 }
                 if (destino === 'grupos' || destino === 'ambos') {
                   const sg = sesiones['grupos'] || sesiones['avisos'];
@@ -1109,23 +1122,24 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                     const dest = accion.destino || 'estado';
                     if (dest === 'estado' || dest === 'ambos') {
                       try {
-                        // ════════════════════════════════════════════════════
-                        // FIX: elegir la sesión con más contactos cargados
-                        // ════════════════════════════════════════════════════
+                        // FIX: SIEMPRE postear via s.sock (personal). Contactos de avisos solo para statusJidList.
                         const _sesAv2 = sesiones['avisos'];
-                        const _ctAv2 = (_sesAv2?.listo ? (_sesAv2.contactos?.size || 0) : 0);
-                        const _ctPe2 = s.contactos?.size || 0;
-                        const sesionEstado = (_ctAv2 >= _ctPe2 && _sesAv2?.listo) ? _sesAv2 : s;
-                        const contactos = Array.from(sesionEstado.contactos || new Set()).filter(j => j.endsWith('@s.whatsapp.net'));
-                        const statusJidList = [...new Set(contactos)].slice(0, 1000);
+                        const _jidSet2 = new Set();
+                        for (const j of (s.contactos || new Set())) { if (j.endsWith('@s.whatsapp.net')) _jidSet2.add(j); }
+                        if (_sesAv2?.contactos) { for (const j of _sesAv2.contactos) { if (j.endsWith('@s.whatsapp.net')) _jidSet2.add(j); } }
+                        if (s.numero) _jidSet2.add(s.numero.replace(/\D/g,'') + '@s.whatsapp.net');
+                        const statusJidList = Array.from(_jidSet2).slice(0, 1000);
                         if (statusJidList.length === 0) {
                           respuesta = '⚠️ Sin contactos cargados. Espera y vuelve a intentarlo. 🤖';
                         } else {
-                          console.log(`[personal] Publicando estado (usar_imagen) via '${sesionEstado === s ? 'personal' : 'avisos'}' con ${statusJidList.length} contactos`);
-                          await sesionEstado.sock.sendMessage('status@broadcast', {
-                            image: img.buffer, caption: img.caption || undefined, mimetype: 'image/jpeg'
+                          console.log(`[personal] Publicando estado (usar_imagen) en cuenta PERSONAL con ${statusJidList.length} contactos (${s.numero})`);
+                          const isJpeg2 = img.buffer[0]===0xFF && img.buffer[1]===0xD8;
+                          await s.sock.sendMessage('status@broadcast', {
+                            image: img.buffer,
+                            mimetype: isJpeg2 ? 'image/jpeg' : 'image/png',
+                            ...(img.caption ? { caption: img.caption } : {}),
                           }, { statusJidList });
-                          console.log(`[personal] ✅ Estado publicado via usar_imagen (${statusJidList.length} contactos)`);
+                          console.log(`[personal] ✅ Estado publicado en PERSONAL (${statusJidList.length} contactos)`);
                         }
                       } catch(e) { console.error('[personal] ❌ Error estado:', e.message); }
                     }
