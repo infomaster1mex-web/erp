@@ -1161,6 +1161,7 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}`;
                     timersActivos.delete(pendiente.id);
                     agente.pendientes = agente.pendientes.filter(p => p.id !== pendiente.id);
                   }
+                }
                 respuesta = respuesta
                   .replace(jsonMatch[0], '')
                   .replace(/```json[\s\S]*?```/g, '')
