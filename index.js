@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════════
 // index.js — SOS Digital WhatsApp Multi-Bot (Baileys)
 // Sesiones: avisos | campanas | grupos | respaldo1 | respaldo2 | personal
+// FIX: publicación de estado en sesión personal usa sesión con más contactos
 // ═══════════════════════════════════════════════════════════════
 import makeWASocket, {
   useMultiFileAuthState,
@@ -33,8 +34,6 @@ const CMD_SESION  = process.env.CMD_SESION     || 'grupos';
 const MEMORIA_FILE   = path.join(__dirname, 'auth_info', 'marketing_memoria.json');
 const SCHEDULES_FILE = path.join(__dirname, 'auth_info', 'marketing_schedules.json');
 
-// ── Memoria persistente ─────────────────────────────────────
-// Guarda: historial de promos enviadas, plantillas, notas
 function cargarMemoria() {
   try {
     if (fs.existsSync(MEMORIA_FILE)) return JSON.parse(fs.readFileSync(MEMORIA_FILE, 'utf8'));
@@ -69,7 +68,6 @@ function guardarPlantilla(nombre, caption) {
   guardarMemoria(mem);
 }
 
-// ── Schedules persistentes ──────────────────────────────────
 function cargarSchedules() {
   try {
     if (fs.existsSync(SCHEDULES_FILE)) return JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8'));
@@ -84,13 +82,9 @@ function guardarSchedules(schedules) {
   } catch(e) {}
 }
 
-// Map de timers activos para poder cancelarlos
 const timersActivos = new Map();
-
-// ── Historial de conversación ───────────────────────────────
 const adminChat = [];
 
-// Estado de ejecución pendiente
 const adminPending = {
   accion: null,
   imgBuffer: null,
@@ -98,14 +92,11 @@ const adminPending = {
   mediaType: null,
 };
 
-// ── Buffer de múltiples archivos ────────────────────────────
-// Acumula imágenes/videos enviados en ráfaga (ej: 3 fotos a la vez)
-// WhatsApp los manda como mensajes separados en rápida sucesión
 const mediaBuffer = {
-  items: [],      // [{buffer, mediaType}]
-  texto: '',      // texto del último mensaje con media o del mensaje de texto que sigue
-  timer: null,    // setTimeout para procesar cuando termina la ráfaga
-  DELAY_MS: 4500, // espera 4.5s desde el último archivo antes de procesar
+  items: [],
+  texto: '',
+  timer: null,
+  DELAY_MS: 4500,
 };
 
 function resetMediaBuffer() {
@@ -115,7 +106,6 @@ function resetMediaBuffer() {
   mediaBuffer.timer = null;
 }
 
-// ── Contexto de memoria para el agente ─────────────────────
 function buildContextoMemoria() {
   const mem = cargarMemoria();
   const schedules = cargarSchedules();
@@ -143,7 +133,6 @@ function buildContextoMemoria() {
   return lines.length ? lines.join('\n') : 'Sin historial aún.';
 }
 
-// ── System prompt completo ──────────────────────────────────
 const MARKETING_SYSTEM = `Eres el *Agente de Marketing de SOS Digital / Infomaster*, una empresa mexicana que revende servicios digitales como streaming y productividad.
 
 Servicios que vendemos: Netflix, Disney+, Max, Prime Video, Paramount+, ViX, Apple TV+, Spotify, YouTube Music, Microsoft 365, Canva Pro, YouTube Premium, Universal+, Crunchyroll.
@@ -232,7 +221,6 @@ REGLAS CRÍTICAS
 ❌ NUNCA pidas confirmación si ya tienes toda la información necesaria
 ❌ NUNCA pongas [ACCION] si genuinamente falta información (ni el texto ni el destino)`;
 
-// ── Llamar al agente ────────────────────────────────────────
 async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones, tieneVideo = false) {
   if (!OPENAI_KEY) {
     return { respuesta: '⚙️ Falta OPENAI_API_KEY en las variables de Railway.', accion: null };
@@ -248,7 +236,6 @@ async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones, tieneVi
   }
 
   adminChat.push({ role: 'user', content: msgUser });
-  // Mantener solo los últimos 20 mensajes (10 turnos)
   if (adminChat.length > 20) adminChat.splice(0, adminChat.length - 20);
 
   try {
@@ -256,7 +243,7 @@ async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones, tieneVi
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_KEY}` },
       body: JSON.stringify({
-        model: 'gpt-4o',           // gpt-4o entiende mucho mejor las intenciones
+        model: 'gpt-4o',
         max_tokens: 800,
         temperature: 0.7,
         messages: [
@@ -286,7 +273,6 @@ async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones, tieneVi
     const texto = data.choices?.[0]?.message?.content?.trim() || '';
     adminChat.push({ role: 'assistant', content: texto });
 
-    // Extraer [ACCION:{...}] — soporta saltos de línea dentro del JSON
     const match = texto.match(/\[ACCION:(\{[\s\S]*?\})\]/);
     let accion = null;
     let respuesta = texto.replace(/\[ACCION:[\s\S]*?\]/, '').trim();
@@ -297,7 +283,6 @@ async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones, tieneVi
         console.log('[AGENTE] Acción detectada:', accion.tipo);
       } catch(e) {
         console.error('[AGENTE] Error parseando accion JSON:', e.message, '→', match[1]);
-        // Intentar limpiar y re-parsear
         try {
           const cleaned = match[1].replace(/[\r\n\t]/g, ' ').replace(/\s+/g, ' ');
           accion = JSON.parse(cleaned);
@@ -318,15 +303,12 @@ async function llamarAgente(mensajeAdmin, tieneImagen, contextoSesiones, tieneVi
 
 // ══════════════════════════════════════════════════════════════
 //  GENERADOR DE IMÁGENES MULTI-PROVEEDOR
-//  Modelos disponibles: dalle3 | gemini | stability | flux
-//  Keys en Railway: OPENAI_API_KEY | GEMINI_API_KEY | STABILITY_API_KEY | FAL_API_KEY
 // ══════════════════════════════════════════════════════════════
 
 const GEMINI_KEY    = process.env.GEMINI_API_KEY    || '';
 const STABILITY_KEY = process.env.STABILITY_API_KEY || '';
 const FAL_KEY       = process.env.FAL_API_KEY       || '';
 
-// Modelo por defecto (puede cambiarse con !modelo dalle3|gemini|stability|flux)
 let modeloImagenActual = process.env.MODELO_IMAGEN || 'dalle3';
 
 const MODELOS_INFO = {
@@ -336,10 +318,8 @@ const MODELOS_INFO = {
   flux:      { nombre: 'FLUX 1.1 Pro (fal.ai)',   keyVar: 'FAL_API_KEY',       emoji: '⚡' },
 };
 
-// Prefijo de prompt base para promos de marketing
 const PROMPT_BASE = 'WhatsApp marketing promotional image for Mexican streaming service reseller SOS Digital. Vibrant colors, bold modern design, professional quality. ';
 
-// ── DALL-E 3 ─────────────────────────────────────────────────
 async function generarConDalle3(prompt) {
   if (!OPENAI_KEY) throw new Error('Falta OPENAI_API_KEY en Railway Variables');
   const res = await fetch('https://api.openai.com/v1/images/generations', {
@@ -361,7 +341,6 @@ async function generarConDalle3(prompt) {
   return Buffer.from(b64, 'base64');
 }
 
-// ── Google Gemini Imagen 3 ────────────────────────────────────
 async function generarConGemini(prompt) {
   if (!GEMINI_KEY) throw new Error('Falta GEMINI_API_KEY en Railway Variables');
   const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${GEMINI_KEY}`;
@@ -385,7 +364,6 @@ async function generarConGemini(prompt) {
   return Buffer.from(b64, 'base64');
 }
 
-// ── Stability AI (Stable Diffusion) ──────────────────────────
 async function generarConStability(prompt) {
   if (!STABILITY_KEY) throw new Error('Falta STABILITY_API_KEY en Railway Variables');
   const formData = new FormData();
@@ -410,11 +388,9 @@ async function generarConStability(prompt) {
   return Buffer.from(arrayBuffer);
 }
 
-// ── FLUX 1.1 Pro via fal.ai ───────────────────────────────────
 async function generarConFlux(prompt) {
   if (!FAL_KEY) throw new Error('Falta FAL_API_KEY en Railway Variables');
 
-  // Enviar request
   const resSubmit = await fetch('https://queue.fal.run/fal-ai/flux-pro/v1.1', {
     method: 'POST',
     headers: {
@@ -431,7 +407,6 @@ async function generarConFlux(prompt) {
   const submitData = await resSubmit.json();
   if (!submitData.request_id) throw new Error('FLUX: no se obtuvo request_id');
 
-  // Polling del resultado
   const requestId = submitData.request_id;
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 3000));
@@ -451,7 +426,6 @@ async function generarConFlux(prompt) {
   throw new Error('FLUX: timeout esperando resultado');
 }
 
-// ── Función principal: delega al proveedor activo ─────────────
 async function generarImagen(prompt, modelo = null) {
   const m = modelo || modeloImagenActual;
   console.log(`[IMG] Generando con: ${m} | prompt: ${prompt.slice(0,60)}...`);
@@ -464,16 +438,13 @@ async function generarImagen(prompt, modelo = null) {
   }
 }
 
-// ── Ejecutar acción ─────────────────────────────────────────
 async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn, videoBuffer = null, mediaType = null) {
 
-  // Auto-detectar tipo de media si no se especifica
   if (!mediaType) {
     if (videoBuffer) mediaType = 'video';
     else if (imgBuffer) mediaType = 'image';
   }
 
-  // REPORTE
   if (accion.tipo === 'reporte') {
     const lines = ['📊 *Reporte SOS Digital*\n'];
     for (const [id, ss] of Object.entries(sesiones)) {
@@ -488,13 +459,11 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     return lines.join('\n');
   }
 
-  // GUARDAR PLANTILLA
   if (accion.tipo === 'guardar_plantilla') {
     guardarPlantilla(accion.nombre, accion.caption);
     return `📁 Plantilla "${accion.nombre}" guardada.`;
   }
 
-  // CANCELAR SCHEDULE
   if (accion.tipo === 'cancelar_schedule') {
     const schedules = cargarSchedules().filter(s => s.id !== accion.id);
     guardarSchedules(schedules);
@@ -506,19 +475,16 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     return `✅ Programación "${accion.id}" cancelada.`;
   }
 
-  // GENERAR IMAGEN CON DALL-E
   if (accion.tipo === 'generar_imagen') {
     await replyFn('🎨 Generando imagen con IA, espera unos segundos...');
     try {
       const buf = await generarImagen(accion.prompt, accion.modelo || null);
-      // Guardar imagen en pending pero SIN acción predefinida — preguntamos al admin
       adminPending.imgBuffer = buf;
       adminPending.accion = {
         tipo: 'esperar_destino',
         caption: accion.caption || '',
         prompt: accion.prompt,
       };
-      // Enviar la imagen generada al admin para revisión
       const s = sesiones[sesionId];
       if (s?.sock) {
         await s.sock.sendMessage(
@@ -535,13 +501,10 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     }
   }
 
-  // ESPERAR DESTINO (después de generar imagen, el admin dice dónde mandar)
   if (accion.tipo === 'esperar_destino') {
-    // Este tipo no debería llegar aquí directamente, se maneja en el bloque admin
     return '⚠️ Error interno: estado esperar_destino inesperado.';
   }
 
-  // PROGRAMAR ENVÍO ÚNICO
   if (accion.tipo === 'programar') {
     const id = 'sch_' + Date.now();
     const minutos = accion.minutos || 5;
@@ -561,7 +524,6 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         imgBuffer, sesiones, SESIONES_ACTIVAS, sesionId, replyFn
       );
       await replyFn(`⏰ *Envío programado ejecutado:*\n${resultado}`);
-      // Eliminar de schedules
       const updated = cargarSchedules().filter(s => s.id !== id);
       guardarSchedules(updated);
       timersActivos.delete(id);
@@ -572,7 +534,6 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     return '';
   }
 
-  // PROGRAMAR DIARIO (hora fija)
   if (accion.tipo === 'programar_diario') {
     const id = 'dia_' + Date.now();
     const hora = accion.hora || '09:00';
@@ -585,7 +546,6 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     });
     guardarSchedules(schedules);
 
-    // Calcular ms hasta la próxima ejecución
     const ahora = new Date();
     const tz = 'America/Mexico_City';
     const ahoraLocal = new Date(ahora.toLocaleString('en-US', { timeZone: tz }));
@@ -609,7 +569,6 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
       timersActivos.set(id, interval);
     };
 
-    // Primer disparo al llegar la hora, luego cada 24h
     const initTimer = setTimeout(async () => {
       const sc = cargarSchedules().find(s => s.id === id);
       if (!sc) return;
@@ -628,7 +587,7 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     return '';
   }
 
-  // ENVIAR A GRUPOS
+  // ENVIAR A GRUPOS / ESTADO / AMBOS
   const caption = accion.caption || '';
   const destinos = accion.tipo === 'ambos' ? ['grupos','estado'] : [accion.tipo];
   const resultados = [];
@@ -636,7 +595,6 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
   for (const dest of destinos) {
     if (dest === 'grupos') {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
-      // Texto solo también es válido — no requiere imagen
       if (!mediaBuffer && !caption) { resultados.push('❌ Grupos: necesito al menos texto o imagen'); continue; }
       const sg = sesiones['grupos'] || sesiones[sesionId];
       if (!sg?.listo) { resultados.push('❌ Grupos: sesión no conectada'); continue; }
@@ -656,7 +614,6 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
               const isJpeg = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
               payload = { image: mediaBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
             } else {
-              // Solo texto
               payload = { text: caption };
             }
             await sg.sock.sendMessage(gid, payload);
@@ -704,7 +661,6 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
   return resultados.join('\n');
 }
 
-// ── Restaurar programaciones diarias al arrancar ────────────
 function restaurarSchedules(sesiones, SESIONES_ACTIVAS, sesionId, replyFn) {
   const schedules = cargarSchedules();
   const diarios = schedules.filter(s => s.tipo === 'diario');
@@ -755,10 +711,6 @@ function restaurarSchedules(sesiones, SESIONES_ACTIVAS, sesionId, replyFn) {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ── Configuración de sesiones ────────────────────────────────
-// ── Sesiones activas (controlar desde Railway → Variables) ───
-// Variable: SESIONES_ACTIVAS = avisos,campanas  (separadas por coma)
-// Por defecto solo arranca 'avisos'
 const SESIONES_ACTIVAS = (process.env.SESIONES_ACTIVAS || 'avisos')
   .split(',').map(s => s.trim()).filter(Boolean);
 
@@ -773,7 +725,6 @@ const SESIONES_CONFIG = {
   personal:  { nombre: 'Personal (Cristian)',    color: '#ec4899', autoReply: false, autoMsg: AUTO_MSG },
 };
 
-// ── Estado global por sesión ─────────────────────────────────
 const sesiones = {};
 for (const id of SESIONES_ACTIVAS) {
   if (SESIONES_CONFIG[id]) {
@@ -783,12 +734,11 @@ for (const id of SESIONES_ACTIVAS) {
       qr: null,
       numero: null,
       reconectando: false,
-      contactos: new Set(), // caché de JIDs para statusJidList
+      contactos: new Set(),
     };
   }
 }
 
-// ── Helpers para persistir contactos en disco ───────────────
 function cargarContactos(sesionId) {
   const file = path.join(__dirname, 'auth_info', sesionId, 'contacts_cache.json');
   try {
@@ -807,7 +757,6 @@ function guardarContactos(sesionId, contactSet) {
   } catch(e) {}
 }
 
-// ── Helpers para nombres de contactos ───────────────────────
 const NOMBRES_FILE = path.join(__dirname, 'auth_info', 'personal', 'nombres_cache.json');
 let nombresCache = {};
 try { if (fs.existsSync(NOMBRES_FILE)) nombresCache = JSON.parse(fs.readFileSync(NOMBRES_FILE, 'utf8')); } catch(e) {}
@@ -829,7 +778,6 @@ function buscarContactoPorNombre(nombre) {
   return null;
 }
 
-// ── Crear/conectar una sesión ────────────────────────────────
 async function conectarSesion(sesionId) {
   const cfg  = SESIONES_CONFIG[sesionId];
   const s    = sesiones[sesionId];
@@ -838,7 +786,6 @@ async function conectarSesion(sesionId) {
   const authDir = path.join(__dirname, 'auth_info', sesionId);
   if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
 
-  // Cargar contactos guardados en disco (persisten entre reinicios de Railway)
   s.contactos = cargarContactos(sesionId);
   console.log(`[${sesionId}] Contactos cargados del disco: ${s.contactos.size}`);
 
@@ -887,8 +834,6 @@ async function conectarSesion(sesionId) {
     }
   });
 
-  // ── Poblar y persistir caché de contactos ────────────────
-  // Helper para agregar y guardar
   const addContactos = (jids) => {
     const antes = s.contactos.size;
     for (const jid of jids) {
@@ -902,7 +847,6 @@ async function conectarSesion(sesionId) {
     }
   };
 
-  // messaging-history.set — solo en conexiones nuevas (QR), pero igual lo escuchamos
   s.sock.ev.on('messaging-history.set', ({ contacts = [], chats = [] }) => {
     addContactos([
       ...contacts.map(c => c.id),
@@ -910,23 +854,18 @@ async function conectarSesion(sesionId) {
     ]);
   });
 
-  // chats.upsert — llega en reconexiones con los chats activos
   s.sock.ev.on('chats.upsert', (chats) => {
     addContactos(chats.map(c => c.id));
   });
 
-  // contacts.upsert — refuerzo
   s.sock.ev.on('contacts.upsert', (contacts) => {
     addContactos(contacts.map(c => c.id || c.notify).filter(Boolean));
-    // Guardar nombres si es sesión personal
     if (sesionId === 'personal') {
       contacts.forEach(c => { if (c.id && (c.name || c.notify)) guardarNombre(c.id, c.name || c.notify); });
     }
   });
 
-  // ── Listener ÚNICO: acumula contactos + comandos + auto-reply ──
   s.sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // 1) Siempre acumular contactos + nombres
     addContactos(messages.map(m => m.key?.remoteJid).filter(Boolean));
     if (sesionId === 'personal') {
       messages.forEach(m => { if (!m.key.fromMe && m.pushName && m.key.remoteJid) guardarNombre(m.key.remoteJid, m.pushName); });
@@ -934,7 +873,7 @@ async function conectarSesion(sesionId) {
 
     for (const msg of messages) {
       // ══════════════════════════════════════════════
-      //  SESIÓN PERSONAL — auto-publicar estado al mandarse imagen a sí mismo
+      //  SESIÓN PERSONAL
       // ══════════════════════════════════════════════
       if (msg.key.fromMe && sesionId === 'personal') {
         const tieneImagen = !!msg.message?.imageMessage;
@@ -942,7 +881,6 @@ async function conectarSesion(sesionId) {
 
         if (type !== 'notify') { continue; }
 
-        // Solo procesar mensajes en el chat propio (Tú)
         const propioNum = s.numero ? s.numero.replace(/\D/g,'') : null;
         const remoteNum = msg.key.remoteJid?.replace('@s.whatsapp.net','').replace(/\D/g,'');
         if (!propioNum || remoteNum !== propioNum) { continue; }
@@ -967,18 +905,17 @@ async function conectarSesion(sesionId) {
               reuploadRequest: s.sock.updateMediaMessage
             });
             if (imgBuffer && imgBuffer.length > 1000) {
-              // Guardar imagen temporalmente para usar después
               if (!s._pendingImg) s._pendingImg = {};
               s._pendingImg = { buffer: imgBuffer, caption, ts: Date.now() };
               await s.sock.sendMessage(selfJid, {
                 text: `📸 Imagen lista. ¿Qué hago con ella?\n\n1️⃣ *Estado* — publicar en mi estado de WhatsApp\n2️⃣ *Grupos* — mandar a todos los grupos\n3️⃣ *Ambos* — estado y grupos\n4️⃣ *Persona* — mandarla a alguien específico\n\nResponde con una opción 🤖`
               });
-              console.log(`[personal] 📸 Imagen recibida, esperando instrucción`);
+              console.log(`[personal] 📸 Imagen recibida (${imgBuffer.length} bytes), esperando instrucción`);
             }
           } catch(e) { console.error('[personal] ❌ Error imagen:', e.message); }
         }
 
-        // ── TEXTO → Agente IA personal ───────────────────────────
+        // ── TEXTO ───────────────────────────────────────────────
         if (tieneTexto && OPENAI_KEY) {
           const texto = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
           if (!texto) { continue; }
@@ -996,9 +933,20 @@ async function conectarSesion(sesionId) {
               s._pendingImg = null;
               try {
                 if (destino === 'estado' || destino === 'ambos') {
-                  const sesionEstado = sesiones['avisos'] || s;
-                  const contactos = Array.from(sesionEstado.contactos || s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
+                  // ════════════════════════════════════════════════════
+                  // FIX: elegir la sesión con más contactos cargados
+                  // ════════════════════════════════════════════════════
+                  const _sesAv = sesiones['avisos'];
+                  const _ctAv = (_sesAv?.listo ? (_sesAv.contactos?.size || 0) : 0);
+                  const _ctPe = s.contactos?.size || 0;
+                  const sesionEstado = (_ctAv >= _ctPe && _sesAv?.listo) ? _sesAv : s;
+                  const contactos = Array.from(sesionEstado.contactos || new Set()).filter(j => j.endsWith('@s.whatsapp.net'));
                   const statusJidList = [...new Set(contactos)].slice(0, 1000);
+                  if (statusJidList.length === 0) {
+                    await s.sock.sendMessage(selfJid, { text: '⚠️ Sin contactos cargados todavía. Espera un momento y vuelve a intentarlo. 🤖' });
+                    continue;
+                  }
+                  console.log(`[personal] Publicando estado via '${sesionEstado === s ? 'personal' : 'avisos'}' con ${statusJidList.length} contactos`);
                   await sesionEstado.sock.sendMessage('status@broadcast', {
                     image: img.buffer, caption: img.caption || undefined, mimetype: 'image/jpeg'
                   }, { statusJidList });
@@ -1027,18 +975,14 @@ async function conectarSesion(sesionId) {
               continue;
             }
           }
-          // ─────────────────────────────────────────────────────────
 
           try {
-            // Cargar historial y memoria del agente personal
             const AGENTE_FILE = path.join(__dirname, 'auth_info', 'agente_personal.json');
             let agente = { historial: [], memoria: [], recordatorios: [] };
             try { if (fs.existsSync(AGENTE_FILE)) agente = JSON.parse(fs.readFileSync(AGENTE_FILE, 'utf8')); } catch(e) {}
 
-            // Hora actual México
             const ahoraMX = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City', dateStyle: 'full', timeStyle: 'short' });
 
-            // Lista de contactos conocidos
             const contactosConocidos = Object.entries(nombresCache).slice(0, 50)
               .map(([num, nom]) => `${nom}: ${num}`).join('\n');
             const contactosStr = contactosConocidos ? `\n\nContactos conocidos:\n${contactosConocidos}` : '';
@@ -1046,7 +990,6 @@ async function conectarSesion(sesionId) {
               ? '\n\n⚠️ HAY UNA IMAGEN PENDIENTE esperando instrucción. Si el usuario dice "estado", "grupos", "ambos" o menciona una persona, responde con {"accion":"usar_imagen","destino":"estado|grupos|ambos|persona"} inmediatamente.'
               : '';
 
-            // Verificar recordatorios pendientes
             const ahora = Date.now();
             const recordatoriosVencidos = agente.recordatorios.filter(r => !r.enviado && r.timestamp <= ahora);
             for (const r of recordatoriosVencidos) {
@@ -1059,7 +1002,6 @@ async function conectarSesion(sesionId) {
               fs.writeFileSync(AGENTE_FILE, JSON.stringify(agente, null, 2));
             }
 
-            // Construir historial (últimos 15 mensajes)
             const histReciente = agente.historial.slice(-15);
             const memoriaStr = agente.memoria.length > 0
               ? '\n\nLo que sé de ti:\n' + agente.memoria.map(m => `• ${m}`).join('\n')
@@ -1110,8 +1052,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
             let respuesta = data.choices?.[0]?.message?.content || '❌ Sin respuesta';
             console.log(`[personal] 🧠 GPT raw: ${respuesta.substring(0, 200)}`);
 
-            // Procesar acciones del agente
-            // Extraer JSON de acción del agente
             let jsonMatch = null;
             try {
               const jsonRegex = /\{(?:[^{}]|\{[^{}]*\})*"accion"\s*:\s*"(recordatorio|memoria|enviar_mensaje|cancelar_mensaje|usar_imagen)"(?:[^{}]|\{[^{}]*\})*\}/gs;
@@ -1128,7 +1068,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                     timestamp: Date.now() + accion.minutos * 60000,
                     enviado: false
                   });
-                  // Programar envío
                   setTimeout(async () => {
                     try {
                       const ag = JSON.parse(fs.readFileSync(AGENTE_FILE, 'utf8'));
@@ -1159,7 +1098,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                   if (mins > 0) {
                     const t = setTimeout(enviar, mins * 60000);
                     timersActivos.set(timerId, t);
-                    // Guardar en agente para poder cancelar
                     if (!agente.pendientes) agente.pendientes = [];
                     agente.pendientes.push({ id: timerId, telefono: accion.telefono, mensaje: accion.mensaje, expira: Date.now() + mins * 60000 });
                   } else await enviar();
@@ -1171,13 +1109,24 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                     const dest = accion.destino || 'estado';
                     if (dest === 'estado' || dest === 'ambos') {
                       try {
-                        const sesionEstado = sesiones['avisos'] || s;
-                        const contactos = Array.from(sesionEstado.contactos || s.contactos).filter(j => j.endsWith('@s.whatsapp.net'));
+                        // ════════════════════════════════════════════════════
+                        // FIX: elegir la sesión con más contactos cargados
+                        // ════════════════════════════════════════════════════
+                        const _sesAv2 = sesiones['avisos'];
+                        const _ctAv2 = (_sesAv2?.listo ? (_sesAv2.contactos?.size || 0) : 0);
+                        const _ctPe2 = s.contactos?.size || 0;
+                        const sesionEstado = (_ctAv2 >= _ctPe2 && _sesAv2?.listo) ? _sesAv2 : s;
+                        const contactos = Array.from(sesionEstado.contactos || new Set()).filter(j => j.endsWith('@s.whatsapp.net'));
                         const statusJidList = [...new Set(contactos)].slice(0, 1000);
-                        await sesionEstado.sock.sendMessage('status@broadcast', {
-                          image: img.buffer, caption: img.caption || undefined, mimetype: 'image/jpeg'
-                        }, { statusJidList });
-                        console.log(`[personal] ✅ Estado publicado via avisos (${statusJidList.length} contactos)`);
+                        if (statusJidList.length === 0) {
+                          respuesta = '⚠️ Sin contactos cargados. Espera y vuelve a intentarlo. 🤖';
+                        } else {
+                          console.log(`[personal] Publicando estado (usar_imagen) via '${sesionEstado === s ? 'personal' : 'avisos'}' con ${statusJidList.length} contactos`);
+                          await sesionEstado.sock.sendMessage('status@broadcast', {
+                            image: img.buffer, caption: img.caption || undefined, mimetype: 'image/jpeg'
+                          }, { statusJidList });
+                          console.log(`[personal] ✅ Estado publicado via usar_imagen (${statusJidList.length} contactos)`);
+                        }
                       } catch(e) { console.error('[personal] ❌ Error estado:', e.message); }
                     }
                     if (dest === 'grupos' || dest === 'ambos') {
@@ -1207,7 +1156,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                     s._pendingImg = null;
                   }
                 } else if (accion.accion === 'cancelar_mensaje') {
-                  // Cancelar último mensaje pendiente o por id
                   if (!agente.pendientes) agente.pendientes = [];
                   const pendiente = accion.id
                     ? agente.pendientes.find(p => p.id === accion.id)
@@ -1227,7 +1175,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
               } catch(e) {}
             }
 
-            // Guardar historial
             agente.historial.push({ rol: 'user', texto });
             agente.historial.push({ rol: 'assistant', texto: respuesta });
             if (agente.historial.length > 100) agente.historial = agente.historial.slice(-100);
@@ -1275,7 +1222,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           try { await s.sock.sendMessage(fromJid, { text: txt }); } catch(e) {}
         };
 
-        // ── Descargar media si viene adjunta ────────────────
         let bufferDescargado = null;
         let mediaTypeDescargado = null;
 
@@ -1292,32 +1238,21 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           }
         }
 
-        // ══════════════════════════════════════════════
-        //  SISTEMA DE BUFFER PARA MÚLTIPLES ARCHIVOS
-        //  WhatsApp manda cada imagen como mensaje separado
-        //  Acumulamos todos los que lleguen en ~4.5s
-        // ══════════════════════════════════════════════
         if (bufferDescargado) {
-          // Agregar al buffer
           mediaBuffer.items.push({ buffer: bufferDescargado, mediaType: mediaTypeDescargado });
-          if (texto) mediaBuffer.texto = texto; // guardar caption si viene con la imagen
+          if (texto) mediaBuffer.texto = texto;
 
-          // Reiniciar el timer (esperar a que no lleguen más archivos)
           if (mediaBuffer.timer) clearTimeout(mediaBuffer.timer);
 
           const conteo = mediaBuffer.items.length;
           if (conteo === 1) {
-            // Primer archivo — avisar que está esperando más
-            // (solo si no trae texto, para no interrumpir)
             if (!texto) {
               await reply(`📎 Archivo recibido. Si vas a mandar más, espera... los acumulo todos juntos.\n_Tengo ${conteo} archivo(s)_`);
             }
           } else {
-            // Archivos adicionales — actualizar conteo
             await reply(`📎 _Acumulando... ${conteo} archivo(s) recibidos. Esperando más..._`);
           }
 
-          // Timer: procesar cuando paren de llegar archivos
           mediaBuffer.timer = setTimeout(async () => {
             const items = [...mediaBuffer.items];
             const textoBuffer = mediaBuffer.texto;
@@ -1325,7 +1260,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
 
             if (!items.length) return;
 
-            // Guardar el último buffer en adminPending para schedules
             const ultimoItem = items[items.length - 1];
             if (ultimoItem.mediaType === 'image') {
               adminPending.imgBuffer = ultimoItem.buffer;
@@ -1339,13 +1273,8 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
             console.log(`[BUFFER] Procesando ${cantidad} archivo(s) con texto: "${textoBuffer}"`);
 
             if (cantidad === 1) {
-              // Un solo archivo — flujo normal
               const item = items[0];
-              const imgBuf   = item.mediaType === 'image' ? item.buffer : null;
-              const vidBuf   = item.mediaType === 'video' ? item.buffer : null;
-
               if (textoBuffer) {
-                // Tiene texto → pregunta destino o ejecuta si ya está claro
                 await reply(`📎 Tengo 1 ${item.mediaType === 'video' ? 'video' : 'imagen'} lista.\n\n¿Dónde la mandamos?\n📤 *grupos* | 📸 *estado* | 🔄 *ambos*`);
                 adminPending.accion = { tipo: 'esperar_destino', caption: textoBuffer };
               } else {
@@ -1355,7 +1284,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
               return;
             }
 
-            // Múltiples archivos
             const tiposResumen = items.map((it, i) => `  ${i+1}. ${it.mediaType === 'video' ? '🎥 video' : '🖼️ imagen'}`).join('\n');
             await reply(
               `📦 *${cantidad} archivos recibidos:*\n${tiposResumen}\n\n` +
@@ -1363,7 +1291,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
               `¿A dónde los mandamos?\n📤 *grupos* | 📸 *estado* | 🔄 *ambos*\n\n` +
               `_(Se enviarán en secuencia con una pequeña pausa entre cada uno)_`
             );
-            // Guardar todos en pending para envío múltiple
             adminPending.accion = {
               tipo: 'esperar_destino_multiple',
               caption: textoBuffer,
@@ -1371,10 +1298,9 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
             };
           }, mediaBuffer.DELAY_MS);
 
-          continue; // no procesar más este mensaje — el timer se encarga
+          continue;
         }
 
-        // ── Si hay texto y hay acción pendiente de múltiples archivos ──
         if (!tieneMedia && texto && adminPending.accion?.tipo === 'esperar_destino_multiple') {
           const textoLower = texto.toLowerCase().trim();
           let destinoElegido = null;
@@ -1396,7 +1322,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
               const item = items[i];
               const imgBuf = item.mediaType === 'image' ? item.buffer : null;
               const vidBuf = item.mediaType === 'video' ? item.buffer : null;
-              // Solo el último o primero lleva caption
               const capItem = i === 0 ? caption : '';
               const accionItem = { tipo: destinoElegido, caption: capItem };
               const res = await ejecutarAccion(accionItem, imgBuf, sesiones, SESIONES_ACTIVAS, sesionId, reply, vidBuf, item.mediaType);
@@ -1408,7 +1333,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           }
         }
 
-        // ── Respuesta a destino para UN solo archivo pendiente ──
         if (!tieneMedia && texto && adminPending.accion?.tipo === 'esperar_destino' && (adminPending.imgBuffer || adminPending.videoBuffer)) {
           const textoLower = texto.toLowerCase().trim();
           let destinoElegido = null;
@@ -1434,21 +1358,17 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           }
         }
 
-        // ── Si llega texto mientras el buffer está acumulando archivos ──
         if (!tieneMedia && mediaBuffer.items.length > 0) {
-          // Guardar el texto como caption y no interrumpir el buffer
           mediaBuffer.texto = texto;
           await reply(`📝 Caption guardado: _"${texto}"_\nSiguiendo con los archivos...`);
           continue;
         }
 
-        // ── Guardar última media en adminPending ────────────
         if (bufferDescargado) {
           if (mediaTypeDescargado === 'image') { adminPending.imgBuffer = bufferDescargado; adminPending.mediaType = 'image'; }
           else { adminPending.videoBuffer = bufferDescargado; adminPending.mediaType = 'video'; }
         }
 
-        // ── Media sin texto y acción pendiente simple ───────
         if (bufferDescargado && !texto && adminPending.accion && adminPending.accion.tipo !== 'esperar_destino' && adminPending.accion.tipo !== 'esperar_destino_multiple') {
           const accionGuardada = adminPending.accion;
           adminPending.accion = null;
@@ -1460,7 +1380,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           continue;
         }
 
-        // ── Comandos directos (sin IA) ──────────────────────
         const textoCmds = texto.toLowerCase().trim();
         if (textoCmds === '!reset' || textoCmds === 'reset' || textoCmds === '!reiniciar') {
           adminChat.length = 0;
@@ -1505,7 +1424,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           continue;
         }
 
-        // Cambiar modelo de generación de imágenes
         if (textoCmds.startsWith('!modelo')) {
           const partes = textoCmds.split(' ');
           const nuevoModelo = partes[1]?.toLowerCase();
@@ -1527,7 +1445,6 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           continue;
         }
 
-        // ── Solo texto sin media → pasar al agente ───────────
         if (!tieneMedia) {
           const ctxSesiones = SESIONES_ACTIVAS.map(id => {
             const ss = sesiones[id];
@@ -1562,10 +1479,10 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
       }
 
       // ══════════════════════════════════════════════
-      //  BLOQUE AUTO-REPLY — para todos los demás
+      //  BLOQUE AUTO-REPLY
       // ══════════════════════════════════════════════
       if (!cfg.autoReply) continue;
-      if (esAdmin) continue; // admin no recibe auto-reply nunca
+      if (esAdmin) continue;
 
       const cacheKey = `${sesionId}:${fromJid}`;
       if (!global._autoReplyCache) global._autoReplyCache = {};
@@ -1592,7 +1509,6 @@ function auth(req, res, next) {
   next();
 }
 
-// ── Normalizar teléfono ──────────────────────────────────────
 function toJid(tel) {
   return String(tel).replace(/\D/g, '') + '@s.whatsapp.net';
 }
@@ -1663,7 +1579,6 @@ app.get('/', (req, res) => {
 //  RUTAS — API GENERAL
 // ═══════════════════════════════════════════════════════════════
 
-// Estado de todas las sesiones
 app.get('/sos/status', (req, res) => {
   const estado = {};
   for (const [id, cfg] of Object.entries(SESIONES_CONFIG)) {
@@ -1680,20 +1595,17 @@ app.get('/sos/status', (req, res) => {
   res.json({ ok: true, sesiones: estado });
 });
 
-// Ping individual (compatible con el sistema anterior)
 app.get('/sos/ping', (req, res) => {
   const s = sesiones.avisos;
   res.json({ ok: s.listo, estado: s.listo ? 'conectado' : 'desconectado', numero: s.numero || null });
 });
 
-// Estado de una sesión específica
 app.get('/sesion/:id/status', (req, res) => {
   const s = sesiones[req.params.id];
   if (!s) return res.json({ ok: false, error: 'Sesión no existe' });
   res.json({ ok: s.listo, numero: s.numero, tieneQR: !!s.qr });
 });
 
-// Reconectar sesión (borra auth y reconecta)
 app.get('/sesion/:id/desconectar', auth, async (req, res) => {
   const id = req.params.id;
   const s = sesiones[id];
@@ -1712,7 +1624,7 @@ app.get('/sesion/:id/desconectar', auth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-//  RUTAS — ENVÍO (Avisos - compatible con sistema anterior)
+//  RUTAS — ENVÍO
 // ═══════════════════════════════════════════════════════════════
 app.post('/sos/enviar', auth, async (req, res) => {
   let { telefono, mensaje, sesion } = req.body;
@@ -1733,7 +1645,6 @@ app.post('/sos/enviar', auth, async (req, res) => {
   }
 });
 
-// Envío masivo (compatible)
 app.post('/sos/enviar-masivo', auth, async (req, res) => {
   const { mensajes, sesion } = req.body;
   const sesionId = sesion || 'avisos';
@@ -1761,10 +1672,9 @@ app.post('/sos/enviar-masivo', auth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-//  RUTAS — CAMPAÑAS (Marketing)
+//  RUTAS — CAMPAÑAS
 // ═══════════════════════════════════════════════════════════════
 
-// Enviar campaña de texto a lista de números
 app.post('/campana/enviar', auth, async (req, res) => {
   const { numeros, mensaje, imagen_url, sesion } = req.body;
   const sesionId = sesion || 'campanas';
@@ -1784,23 +1694,14 @@ app.post('/campana/enviar', auth, async (req, res) => {
 
     try {
       if (imagen_url && mensaje) {
-        // Imagen con caption
-        await s.sock.sendMessage(toJid(limpio), {
-          image: { url: imagen_url },
-          caption: mensaje
-        });
+        await s.sock.sendMessage(toJid(limpio), { image: { url: imagen_url }, caption: mensaje });
       } else if (imagen_url) {
-        // Solo imagen
-        await s.sock.sendMessage(toJid(limpio), {
-          image: { url: imagen_url }
-        });
+        await s.sock.sendMessage(toJid(limpio), { image: { url: imagen_url } });
       } else {
-        // Solo texto
         await s.sock.sendMessage(toJid(limpio), { text: mensaje });
       }
       resultados.push({ telefono: limpio, ok: true });
       exitosos++;
-      // Pausa anti-ban: 1.5-3 seg random
       await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500));
     } catch (err) {
       resultados.push({ telefono: limpio, ok: false, error: err.message });
@@ -1811,7 +1712,6 @@ app.post('/campana/enviar', auth, async (req, res) => {
   res.json({ ok: true, total: numeros.length, exitosos, fallidos: numeros.length - exitosos, resultados });
 });
 
-// Enviar imagen desde base64
 app.post('/campana/enviar-imagen', auth, async (req, res) => {
   const { numeros, mensaje, imagen_base64, sesion } = req.body;
   const sesionId = sesion || 'campanas';
@@ -1847,7 +1747,6 @@ app.post('/campana/enviar-imagen', auth, async (req, res) => {
 //  RUTAS — GRUPOS
 // ═══════════════════════════════════════════════════════════════
 
-// Obtener lista de grupos
 app.get('/grupos/lista', auth, async (req, res) => {
   const sesionId = req.query.sesion || 'grupos';
   const s = sesiones[sesionId];
@@ -1867,7 +1766,6 @@ app.get('/grupos/lista', auth, async (req, res) => {
   }
 });
 
-// Enviar mensaje a grupos
 app.post('/grupos/enviar', auth, async (req, res) => {
   const { grupo_ids, mensaje, imagen_url, imagen_base64, sesion } = req.body;
   const sesionId = sesion || 'grupos';
@@ -1908,50 +1806,32 @@ app.post('/grupos/enviar', auth, async (req, res) => {
 //  RUTAS — ESTADO / STORY WHATSAPP
 // ═══════════════════════════════════════════════════════════════
 
-// Publicar imagen como estado (story) en una sesión
-// Fix: acepta lista de contactos desde PHP (base de datos) y la combina con el caché local
 app.post('/estado/publicar', auth, async (req, res) => {
   const { sesion, imagen_base64, caption = '', contactos = [] } = req.body;
 
-  if (!sesion) {
-    return res.json({ success: false, message: 'Falta parámetro: sesion' });
-  }
-  if (!imagen_base64) {
-    return res.json({ success: false, message: 'Falta parámetro: imagen_base64' });
-  }
+  if (!sesion) return res.json({ success: false, message: 'Falta parámetro: sesion' });
+  if (!imagen_base64) return res.json({ success: false, message: 'Falta parámetro: imagen_base64' });
 
   const s = sesiones[sesion];
-  if (!s) {
-    return res.json({ success: false, message: `Sesión "${sesion}" no existe en este hub` });
-  }
-  if (!s.listo) {
-    return res.json({ success: false, message: `Sesión "${sesion}" no está conectada` });
-  }
+  if (!s) return res.json({ success: false, message: `Sesión "${sesion}" no existe en este hub` });
+  if (!s.listo) return res.json({ success: false, message: `Sesión "${sesion}" no está conectada` });
 
   try {
-    // Limpiar base64 por si viene con prefijo data:image/...;base64,
     const rawB64 = imagen_base64.includes(',') ? imagen_base64.split(',')[1] : imagen_base64;
     const imgBuffer = Buffer.from(rawB64, 'base64');
 
-    // ── Construir statusJidList ──────────────────────────────
-    // Prioridad: 1) lista de contactos enviada desde PHP (BD de clientes)
-    //            2) caché local acumulado por mensajes/chats
     const jidSet = new Set();
 
-    // 1) Contactos del ERP (teléfonos de la BD convertidos a JIDs)
     if (Array.isArray(contactos) && contactos.length > 0) {
       for (const tel of contactos) {
         const limpio = String(tel).replace(/\D/g, '');
         if (limpio.length >= 10) jidSet.add(limpio + '@s.whatsapp.net');
       }
-      // Actualizar caché local con estos contactos
       addContactos(sesion, Array.from(jidSet));
     }
 
-    // 2) Caché local acumulado
     for (const jid of s.contactos) jidSet.add(jid);
 
-    // 3) Propio JID de la sesión (requerido por WhatsApp)
     const propioJid = s.numero ? s.numero + '@s.whatsapp.net' : null;
     if (propioJid) jidSet.add(propioJid);
 
@@ -1962,7 +1842,6 @@ app.post('/estado/publicar', auth, async (req, res) => {
       return res.json({ success: false, message: `Sesión "${sesion}": sin contactos para publicar estado. Envía mensajes primero o espera que se cargue el historial.` });
     }
 
-    // Detectar tipo MIME desde el buffer
     const isJpeg = imgBuffer[0] === 0xFF && imgBuffer[1] === 0xD8;
     const isPng  = imgBuffer[0] === 0x89 && imgBuffer[1] === 0x50;
     const mimetype = isJpeg ? 'image/jpeg' : isPng ? 'image/png' : 'image/jpeg';
@@ -1970,11 +1849,7 @@ app.post('/estado/publicar', auth, async (req, res) => {
     const msgPayload = { image: imgBuffer, mimetype };
     if (caption && caption.trim()) msgPayload.caption = caption.trim();
 
-    await s.sock.sendMessage(
-      'status@broadcast',
-      msgPayload,
-      { statusJidList }
-    );
+    await s.sock.sendMessage('status@broadcast', msgPayload, { statusJidList });
 
     console.log(`[estado] ✅ Estado publicado en sesión "${sesion}" → ${statusJidList.length} contactos`);
     res.json({
@@ -1989,7 +1864,6 @@ app.post('/estado/publicar', auth, async (req, res) => {
   }
 });
 
-// Helper: añadir JIDs al caché de una sesión específica
 function addContactos(sesionId, jids) {
   const s = sesiones[sesionId];
   if (!s) return;
@@ -2008,7 +1882,6 @@ app.listen(PORT, () => {
   console.log(`[SERVER] Sesiones activas: ${SESIONES_ACTIVAS.join(', ')}`);
 });
 
-// Iniciar solo sesiones activas con delay entre cada una
 (async () => {
   const ids = SESIONES_ACTIVAS.filter(id => SESIONES_CONFIG[id]);
   console.log(`[BOOT] Sesiones activas: ${ids.join(', ')}`);
@@ -2020,7 +1893,6 @@ app.listen(PORT, () => {
   }
   console.log('[BOOT] ✅ Sesiones iniciadas');
 
-  // Restaurar programaciones diarias después de que las sesiones se conecten
   setTimeout(() => {
     const cmdSesion = sesiones[CMD_SESION];
     const replyAdmin = async (txt) => {
@@ -2040,5 +1912,5 @@ app.listen(PORT, () => {
         `_Escríbeme para continuar donde quedamos._`
       );
     }
-  }, 15000); // esperar 15s a que se conecten las sesiones
+  }, 15000);
 })();
