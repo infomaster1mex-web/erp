@@ -876,6 +876,23 @@ async function conectarSesion(sesionId) {
       s._retryCount = 0;
       s.numero = s.sock.user?.id?.split(':')[0] || null;
       console.log(`[${sesionId}] ✅ Conectado: ${s.numero}`);
+
+      // Forzar sync de historial para cargar contactos (especialmente para sesión personal)
+      if (s.contactos.size < 10) {
+        console.log(`[${sesionId}] ⏳ Pocos contactos (${s.contactos.size}), esperando sync de historial...`);
+        // Baileys envía messaging-history.set automáticamente, pero puede tardar
+        // Log periódico para monitorear la carga
+        const syncCheck = setInterval(() => {
+          if (s.contactos.size > 50) {
+            console.log(`[${sesionId}] ✅ Contactos sincronizados: ${s.contactos.size}`);
+            clearInterval(syncCheck);
+          } else {
+            console.log(`[${sesionId}] ⏳ Contactos hasta ahora: ${s.contactos.size}`);
+          }
+        }, 15000);
+        // Dejar de checar después de 5 min
+        setTimeout(() => clearInterval(syncCheck), 300000);
+      }
     }
 
     if (connection === 'close') {
