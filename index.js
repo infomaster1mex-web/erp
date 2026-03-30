@@ -959,6 +959,7 @@ async function conectarSesion(sesionId) {
       // ══════════════════════════════════════════════
       if (msg.key.fromMe && sesionId === 'personal') {
         const tieneImagen = !!msg.message?.imageMessage;
+        const tieneVideo  = !!msg.message?.videoMessage;
         const tieneTexto  = !!(msg.message?.conversation || msg.message?.extendedTextMessage?.text);
 
         if (type !== 'notify') { continue; }
@@ -984,24 +985,29 @@ async function conectarSesion(sesionId) {
 
         const selfJid = msg.key.remoteJid;
 
-        // ── IMAGEN → preguntar qué hacer ─────────────────────────
-        if (tieneImagen) {
+        // ── IMAGEN o VIDEO → preguntar qué hacer ──────────────────
+        if (tieneImagen || tieneVideo) {
           try {
-            const caption = msg.message.imageMessage?.caption || '';
+            const caption = tieneImagen
+              ? (msg.message.imageMessage?.caption || '')
+              : (msg.message.videoMessage?.caption || '');
+            const mediaType = tieneVideo ? 'video' : 'image';
             const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
-            const imgBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
+            const mediaBuffer = await downloadMediaMessage(msg, 'buffer', {}, {
               logger: pino({ level: 'silent' }),
               reuploadRequest: s.sock.updateMediaMessage
             });
-            if (imgBuffer && imgBuffer.length > 1000) {
+            if (mediaBuffer && mediaBuffer.length > 1000) {
               if (!s._pendingImg) s._pendingImg = {};
-              s._pendingImg = { buffer: imgBuffer, caption, ts: Date.now() };
+              s._pendingImg = { buffer: mediaBuffer, caption, mediaType, ts: Date.now() };
+              const emoji = tieneVideo ? '🎥' : '📸';
+              const tipo = tieneVideo ? 'Video' : 'Imagen';
               await s.sock.sendMessage(selfJid, {
-                text: `📸 Imagen lista. ¿Qué hago con ella?\n\n1️⃣ *Estado* — publicar en mi estado de WhatsApp\n2️⃣ *Grupos* — mandar a todos los grupos\n3️⃣ *Ambos* — estado y grupos\n4️⃣ *Persona* — mandarla a alguien específico\n\nResponde con una opción 🤖`
+                text: `${emoji} ${tipo} listo. ¿Qué hago con ${tieneVideo ? 'él' : 'ella'}?\n\n1️⃣ *Estado* — publicar en mi estado de WhatsApp\n2️⃣ *Grupos* — mandar a todos los grupos\n3️⃣ *Ambos* — estado y grupos\n4️⃣ *Persona* — mandarla a alguien específico\n\nResponde con una opción 🤖`
               });
-              console.log(`[personal] 📸 Imagen recibida (${imgBuffer.length} bytes), esperando instrucción`);
+              console.log(`[personal] ${emoji} ${tipo} recibido (${mediaBuffer.length} bytes), esperando instrucción`);
             }
-          } catch(e) { console.error('[personal] ❌ Error imagen:', e.message); }
+          } catch(e) { console.error('[personal] ❌ Error media:', e.message); }
         }
 
         // ── TEXTO ───────────────────────────────────────────────
@@ -1032,12 +1038,14 @@ async function conectarSesion(sesionId) {
                     continue;
                   }
                   console.log(`[personal] Publicando estado en cuenta PERSONAL con ${statusJidList.length} contactos (${s.numero})`);
-                  const isJpeg1 = img.buffer[0]===0xFF && img.buffer[1]===0xD8;
-                  await s.sock.sendMessage('status@broadcast', {
-                    image: img.buffer,
-                    mimetype: isJpeg1 ? 'image/jpeg' : 'image/png',
-                    ...(img.caption ? { caption: img.caption } : {}),
-                  }, { statusJidList });
+                  let payload;
+                  if (img.mediaType === 'video') {
+                    payload = { video: img.buffer, mimetype: 'video/mp4', ...(img.caption ? { caption: img.caption } : {}) };
+                  } else {
+                    const isJpeg1 = img.buffer[0]===0xFF && img.buffer[1]===0xD8;
+                    payload = { image: img.buffer, mimetype: isJpeg1 ? 'image/jpeg' : 'image/png', ...(img.caption ? { caption: img.caption } : {}) };
+                  }
+                  await s.sock.sendMessage('status@broadcast', payload, { statusJidList });
                   console.log(`[personal] ✅ Estado publicado en PERSONAL (${statusJidList.length} contactos)`);
                 }
                 if (destino === 'grupos' || destino === 'ambos') {
@@ -1048,15 +1056,21 @@ async function conectarSesion(sesionId) {
                     let ok = 0;
                     for (const gid of gids) {
                       try {
-                        await sg.sock.sendMessage(gid, { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) });
+                        let gPayload;
+                        if (img.mediaType === 'video') {
+                          gPayload = { video: img.buffer, mimetype: 'video/mp4', ...(img.caption ? { caption: img.caption } : {}) };
+                        } else {
+                          gPayload = { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) };
+                        }
+                        await sg.sock.sendMessage(gid, gPayload);
                         ok++;
                         await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
                       } catch(e) {}
                     }
-                    console.log(`[personal] ✅ Imagen enviada a ${ok} grupos`);
+                    console.log(`[personal] ✅ Media enviado a ${ok} grupos`);
                   }
                 }
-                await s.sock.sendMessage(selfJid, { text: `✅ Listo, imagen publicada en ${destino}. 🤖` });
+                await s.sock.sendMessage(selfJid, { text: `✅ Listo, publicado en ${destino}. 🤖` });
               } catch(e) {
                 console.error(`[personal] ❌ Error publicando estado:`, e.message, e.stack?.split('\n')[1]);
                 await s.sock.sendMessage(selfJid, { text: `❌ Error: ${e.message} 🤖` });
@@ -1076,7 +1090,7 @@ async function conectarSesion(sesionId) {
               .map(([num, nom]) => `${nom}: ${num}`).join('\n');
             const contactosStr = contactosConocidos ? `\n\nContactos conocidos:\n${contactosConocidos}` : '';
             const pendingImgStr = (s._pendingImg && Date.now() - s._pendingImg.ts < 300000)
-              ? '\n\n⚠️ HAY UNA IMAGEN PENDIENTE esperando instrucción. Si el usuario dice "estado", "grupos", "ambos" o menciona una persona, responde con {"accion":"usar_imagen","destino":"estado|grupos|ambos|persona"} inmediatamente.'
+              ? `\n\n⚠️ HAY ${s._pendingImg.mediaType === 'video' ? 'UN VIDEO' : 'UNA IMAGEN'} PENDIENTE esperando instrucción. Si el usuario dice "estado", "grupos", "ambos" o menciona una persona, responde con {"accion":"usar_imagen","destino":"estado|grupos|ambos|persona"} inmediatamente.`
               : '';
 
             const ahora = Date.now();
@@ -1215,12 +1229,14 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                           respuesta = '⚠️ Sin contactos cargados. Espera y vuelve a intentarlo. 🤖';
                         } else {
                           console.log(`[personal] Publicando estado (usar_imagen) en cuenta PERSONAL con ${statusJidList.length} contactos (${s.numero})`);
-                          const isJpeg2 = img.buffer[0]===0xFF && img.buffer[1]===0xD8;
-                          await s.sock.sendMessage('status@broadcast', {
-                            image: img.buffer,
-                            mimetype: isJpeg2 ? 'image/jpeg' : 'image/png',
-                            ...(img.caption ? { caption: img.caption } : {}),
-                          }, { statusJidList });
+                          let uPayload;
+                          if (img.mediaType === 'video') {
+                            uPayload = { video: img.buffer, mimetype: 'video/mp4', ...(img.caption ? { caption: img.caption } : {}) };
+                          } else {
+                            const isJpeg2 = img.buffer[0]===0xFF && img.buffer[1]===0xD8;
+                            uPayload = { image: img.buffer, mimetype: isJpeg2 ? 'image/jpeg' : 'image/png', ...(img.caption ? { caption: img.caption } : {}) };
+                          }
+                          await s.sock.sendMessage('status@broadcast', uPayload, { statusJidList });
                           console.log(`[personal] ✅ Estado publicado en PERSONAL (${statusJidList.length} contactos)`);
                         }
                       } catch(e) {
@@ -1236,19 +1252,31 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                           let ok = 0;
                           for (const gid of gids) {
                             try {
-                              await sg.sock.sendMessage(gid, { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) });
+                              let gp;
+                              if (img.mediaType === 'video') {
+                                gp = { video: img.buffer, mimetype: 'video/mp4', ...(img.caption ? { caption: img.caption } : {}) };
+                              } else {
+                                gp = { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) };
+                              }
+                              await sg.sock.sendMessage(gid, gp);
                               ok++;
                               await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
                             } catch(e) {}
                           }
-                          console.log(`[personal] ✅ Imagen enviada a ${ok} grupos`);
+                          console.log(`[personal] ✅ Media enviado a ${ok} grupos`);
                         }
                       } catch(e) { console.error('[personal] ❌ Error grupos:', e.message); }
                     }
                     if (dest === 'persona' && accion.telefono) {
                       try {
                         const destJid = accion.telefono.replace(/\D/g,'') + '@s.whatsapp.net';
-                        await s.sock.sendMessage(destJid, { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) });
+                        let pp;
+                        if (img.mediaType === 'video') {
+                          pp = { video: img.buffer, mimetype: 'video/mp4', ...(img.caption ? { caption: img.caption } : {}) };
+                        } else {
+                          pp = { image: img.buffer, mimetype: 'image/jpeg', ...(img.caption ? { caption: img.caption } : {}) };
+                        }
+                        await s.sock.sendMessage(destJid, pp);
                       } catch(e) { console.error('[personal] ❌ Error persona:', e.message); }
                     }
                     s._pendingImg = null;
