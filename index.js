@@ -650,6 +650,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         const groups = await sg.sock.groupFetchAllParticipating();
         const gids = Object.keys(groups);
         if (!gids.length) { resultados.push('❌ Grupos: no hay grupos'); continue; }
+        console.log(`[GRUPOS] 📋 ${gids.length} grupos encontrados:`, gids.map(g => `${groups[g]?.subject || g}`).join(', '));
+        console.log(`[GRUPOS] 📦 Payload: mediaType=${mediaType}, bufferSize=${mediaBuffer?.length || 0}, caption=${caption?.length || 0} chars`);
         await replyFn(`📤 Enviando a ${gids.length} grupos...`);
         let ok = 0, fail = 0;
 
@@ -667,7 +669,10 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
             await sg.sock.sendMessage(gid, payload);
             ok++;
             await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
-          } catch(e) { fail++; }
+          } catch(e) {
+            console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}):`, e.message);
+            fail++;
+          }
         }
         registrarPromoEnviada(caption, 'grupos', ok);
         resultados.push(`✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}`);
@@ -680,13 +685,18 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
       // Excluir sesión personal del envío de promos/marketing
       const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo && id !== 'personal');
       if (!targets.length) { resultados.push('❌ Estado: no hay sesiones activas'); continue; }
+      console.log(`[ESTADO] 🎯 Sesiones target: ${targets.join(', ')} (excluidas: ${SESIONES_ACTIVAS.filter(id => !targets.includes(id)).join(', ')})`);
       let ok = 0, fail = 0;
       for (const sid of targets) {
         try {
           const ss = sesiones[sid];
           // FIX v2: usar helper robusto para statusJidList
           const statusJidList = buildStatusJidList(ss, sesiones, SESIONES_ACTIVAS);
-          if (!statusJidList.length) { fail++; continue; }
+          if (!statusJidList.length) {
+            console.error(`[ESTADO] ❌ "${sid}" sin contactos para statusJidList`);
+            fail++;
+            continue;
+          }
 
           let payload;
           if (mediaType === 'video') {
