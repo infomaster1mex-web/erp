@@ -4,7 +4,8 @@
 // FIX: publicación de estado en sesión personal usa sesión con más contactos
 // FIX v2: soporte @lid + diagnóstico statusJidList
 // ═══════════════════════════════════════════════════════════════
-import makeWASocket, {
+import {
+  makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
