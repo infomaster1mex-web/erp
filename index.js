@@ -672,6 +672,31 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           } catch(e) {
             console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}):`, e.message);
             fail++;
+            // Auto-recovery: si es error de senderMessageKeys corruptos
+            if (e.message?.includes('senderMessageKeys') && !sg._senderKeysFixed) {
+              sg._senderKeysFixed = true;
+              const cleaned = limpiarSenderKeys('grupos');
+              if (cleaned) {
+                console.log(`[GRUPOS] 🔄 Sender keys limpiadas, reintentando desde este grupo...`);
+                // Reintentar este grupo después de limpiar
+                try {
+                  let retryPayload;
+                  if (mediaType === 'video' && mediaBuffer) {
+                    retryPayload = { video: mediaBuffer, mimetype: 'video/mp4', ...(caption ? { caption } : {}) };
+                  } else if (mediaBuffer) {
+                    const isJpeg2 = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
+                    retryPayload = { image: mediaBuffer, mimetype: isJpeg2 ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
+                  } else {
+                    retryPayload = { text: caption };
+                  }
+                  await sg.sock.sendMessage(gid, retryPayload);
+                  fail--; ok++;
+                  console.log(`[GRUPOS] ✅ Retry exitoso en ${groups[gid]?.subject || gid}`);
+                } catch(e2) {
+                  console.error(`[GRUPOS] ❌ Retry también falló:`, e2.message);
+                }
+              }
+            }
           }
         }
         registrarPromoEnviada(caption, 'grupos', ok);
@@ -713,6 +738,20 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           await new Promise(r => setTimeout(r, 1500));
         } catch(e) {
           console.error(`[ESTADO] ❌ Error en "${sid}":`, e.message);
+          // Auto-recovery: limpiar sender keys corruptos y reintentar
+          if (e.message?.includes('senderMessageKeys')) {
+            const cleaned = limpiarSenderKeys(sid);
+            if (cleaned) {
+              try {
+                await ss.sock.sendMessage('status@broadcast', payload, { statusJidList });
+                console.log(`[ESTADO] ✅ Retry exitoso en "${sid}" después de limpiar sender keys`);
+                ok++;
+                continue;
+              } catch(e2) {
+                console.error(`[ESTADO] ❌ Retry también falló en "${sid}":`, e2.message);
+              }
+            }
+          }
           fail++;
         }
       }
@@ -818,6 +857,24 @@ function guardarContactos(sesionId, contactSet) {
     const file = path.join(__dirname, 'auth_info', sesionId, 'contacts_cache.json');
     fs.writeFileSync(file, JSON.stringify(Array.from(contactSet)));
   } catch(e) {}
+}
+
+// FIX: Limpia sender-key files corruptos (error "senderMessageKeys on number")
+function limpiarSenderKeys(sesionId) {
+  const authDir = path.join(__dirname, 'auth_info', sesionId);
+  try {
+    const files = fs.readdirSync(authDir);
+    const senderFiles = files.filter(f => f.startsWith('sender-key-'));
+    if (!senderFiles.length) return 0;
+    for (const f of senderFiles) {
+      fs.unlinkSync(path.join(authDir, f));
+    }
+    console.log(`[FIX] 🧹 Eliminados ${senderFiles.length} sender-key files de "${sesionId}"`);
+    return senderFiles.length;
+  } catch(e) {
+    console.error(`[FIX] Error limpiando sender-keys de "${sesionId}":`, e.message);
+    return 0;
+  }
 }
 
 const NOMBRES_FILE = path.join(__dirname, 'auth_info', 'personal', 'nombres_cache.json');
@@ -1542,6 +1599,21 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           await reply('🔄 Historial limpiado. ¡Empezamos de cero!\n\nPuedes decirme:\n• "hazme una imagen de Disney+ a $35"\n• "manda una promo a los grupos"\n• "dame el reporte"\n• "programa una promo diaria a las 9am"');
           continue;
         }
+        if (textoCmds === '!fix' || textoCmds === '!fix-grupos') {
+          let totalCleaned = 0;
+          const results = [];
+          for (const sid of SESIONES_ACTIVAS) {
+            const cleaned = limpiarSenderKeys(sid);
+            totalCleaned += cleaned;
+            if (cleaned) results.push(`🧹 *${sid}*: ${cleaned} archivos limpiados`);
+          }
+          if (totalCleaned) {
+            await reply(`🔧 *Sender keys reparadas*\n\n${results.join('\n')}\n\n_Intenta enviar de nuevo._`);
+          } else {
+            await reply('✅ No se encontraron sender keys corruptas. Todo limpio.');
+          }
+          continue;
+        }
         if (textoCmds === '!ayuda' || textoCmds === '!help' || textoCmds === 'ayuda') {
           await reply(
             '🤖 *Agente de Marketing SOS Digital*\n\n' +
@@ -1557,6 +1629,7 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
             '💾 "guarda esta plantilla como promo_netflix"\n\n' +
             '📦 *Múltiples archivos:* Manda 2, 3 o más imágenes seguidas y los envío todos.\n\n' +
             '🔄 Escribe *!reset* si el bot se confunde\n' +
+            '🔧 Escribe *!fix* para reparar errores de envío a grupos\n' +
             '📋 Escribe *!estado* para ver programaciones activas\n' +
             '🎨 Escribe *!modelo* para ver/cambiar modelo de imágenes\n\n' +
             '_Modelos: dalle3 | gemini | stability | flux_'
