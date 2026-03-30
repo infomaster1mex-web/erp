@@ -677,7 +677,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     if (dest === 'estado') {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
       if (!mediaBuffer) { resultados.push('❌ Estado: necesito la imagen o video'); continue; }
-      const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo);
+      // Excluir sesión personal del envío de promos/marketing
+      const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo && id !== 'personal');
       if (!targets.length) { resultados.push('❌ Estado: no hay sesiones activas'); continue; }
       let ok = 0, fail = 0;
       for (const sid of targets) {
