@@ -853,7 +853,7 @@ async function conectarSesion(sesionId) {
     auth:   state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: [`SOS ${cfg.nombre}`, 'Chrome', '120.0'],
+    browser: [`SOS ${cfg.nombre}`, 'Chrome', '131.0'],
   });
 
   s.sock.ev.on('creds.update', saveCreds);
@@ -871,6 +871,7 @@ async function conectarSesion(sesionId) {
       s.listo = true;
       s.qr    = null;
       s.reconectando = false;
+      s._retryCount = 0;
       s.numero = s.sock.user?.id?.split(':')[0] || null;
       console.log(`[${sesionId}] ✅ Conectado: ${s.numero}`);
     }
@@ -880,10 +881,27 @@ async function conectarSesion(sesionId) {
       const code = lastDisconnect?.error?.output?.statusCode;
       const reconectar = code !== DisconnectReason.loggedOut;
       console.log(`[${sesionId}] Desconectado. Código: ${code}`);
-      if (reconectar && !s.reconectando) {
+
+      // Track retry attempts for 515 loops
+      if (!s._retryCount) s._retryCount = 0;
+
+      if (code === 515) {
+        s._retryCount++;
+        console.log(`[${sesionId}] Retry #${s._retryCount} por código 515`);
+        if (s._retryCount >= 3) {
+          console.log(`[${sesionId}] ⚠️ 3 intentos fallidos con 515, limpiando auth...`);
+          try { fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
+          s._retryCount = 0;
+          setTimeout(() => conectarSesion(sesionId), 10000);
+        } else {
+          setTimeout(() => conectarSesion(sesionId), 5000 * s._retryCount);
+        }
+      } else if (reconectar && !s.reconectando) {
+        s._retryCount = 0;
         s.reconectando = true;
         setTimeout(() => conectarSesion(sesionId), 5000);
       } else if (!reconectar) {
+        s._retryCount = 0;
         try { fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
         setTimeout(() => conectarSesion(sesionId), 3000);
       }
