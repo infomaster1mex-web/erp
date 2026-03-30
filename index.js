@@ -856,6 +856,7 @@ async function conectarSesion(sesionId) {
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
     browser: [`SOS ${cfg.nombre}`, 'Chrome', '131.0'],
+    syncFullHistory: true,
   });
 
   s.sock.ev.on('creds.update', saveCreds);
