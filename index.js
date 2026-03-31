@@ -965,8 +965,8 @@ async function conectarSesion(sesionId) {
     auth:   state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: [`SOS ${cfg.nombre}`, 'Chrome', '131.0'],
-    syncFullHistory: true,
+    browser: ['Chrome (Linux)', 'Chrome', '131.0.0.0'],
+    syncFullHistory: false,
   });
 
   s.sock.ev.on('creds.update', saveCreds);
@@ -985,6 +985,7 @@ async function conectarSesion(sesionId) {
       s.qr    = null;
       s.reconectando = false;
       s._retryCount = 0;
+      s._logoutCount = 0;
       s.numero = s.sock.user?.id?.split(':')[0] || null;
       console.log(`[${sesionId}] ✅ Conectado: ${s.numero}`);
 
@@ -1049,9 +1050,21 @@ async function conectarSesion(sesionId) {
         const staggerDelay = 5000 + (Object.keys(sesiones).indexOf(sesionId) * 3000);
         setTimeout(() => conectarSesion(sesionId), staggerDelay);
       } else if (!reconectar) {
+        // 401 = loggedOut — WA expulsó la sesión
+        if (!s._logoutCount) s._logoutCount = 0;
+        s._logoutCount++;
         s._retryCount = 0;
         try { fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
-        setTimeout(() => conectarSesion(sesionId), 3000);
+        // Cooldown creciente para no hacer ciclos rápidos que WA penaliza
+        const logoutDelay = Math.min(s._logoutCount * 30000, 300000); // 30s, 60s, 90s... max 5min
+        console.log(`[${sesionId}] 🚫 LoggedOut #${s._logoutCount} — esperando ${Math.round(logoutDelay/1000)}s antes de generar QR nuevo`);
+        if (s._logoutCount >= 5) {
+          console.log(`[${sesionId}] ❌ Demasiados logouts seguidos. Sesión pausada — reconectar manualmente desde el Hub.`);
+          s._logoutCount = 0;
+          s.reconectando = false;
+        } else {
+          setTimeout(() => conectarSesion(sesionId), logoutDelay);
+        }
       }
     }
   });
