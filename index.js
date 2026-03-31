@@ -640,11 +640,15 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
   const destinos = accion.tipo === 'ambos' ? ['grupos','estado'] : [accion.tipo];
   const resultados = [];
 
+  const grupoSesionId = process.env._GRUPO_OVERRIDE || 'grupos';
+  const GROUP_SEND_TIMEOUT_MS = Number(process.env.GROUP_SEND_TIMEOUT_MS || 45000);
+  const STATUS_SEND_TIMEOUT_MS = Number(process.env.STATUS_SEND_TIMEOUT_MS || 30000);
+  const BOTH_FLOW_PAUSE_MS = Number(process.env.BOTH_FLOW_PAUSE_MS || 2500);
+
   // --- Función: enviar a grupos ---
   async function enviarGrupos() {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
       if (!mediaBuffer && !caption) return '❌ Grupos: necesito al menos texto o imagen';
-      const grupoSesionId = process.env._GRUPO_OVERRIDE || 'grupos';
       const sg = sesiones[grupoSesionId] || sesiones['grupos'] || sesiones[sesionId];
       if (!sg?.listo || !sg?.sock?.sendMessage) return '❌ Grupos: sesión no conectada o socket muerto';
       try {
@@ -652,20 +656,19 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         const gids = Object.keys(groups);
         if (!gids.length) return '❌ Grupos: no hay grupos';
         console.log(`[GRUPOS] 📋 ${gids.length} grupos encontrados:`, gids.map(g => `${groups[g]?.subject || g}`).join(', '));
-        console.log(`[GRUPOS] 📦 Payload: mediaType=${mediaType}, bufferSize=${mediaBuffer?.length || 0}, caption=${caption?.length || 0} chars`);
+        console.log(`[GRUPOS] 📦 Payload: mediaType=${mediaType}, bufferSize=${mediaBuffer?.length || 0}, caption=${caption?.length || 0} chars, timeout=${GROUP_SEND_TIMEOUT_MS}ms`);
         await replyFn(`📤 Enviando a ${gids.length} grupos...`);
         let ok = 0, fail = 0;
         let consecutiveFails = 0;
 
         for (const gid of gids) {
-          // Circuit breaker: si 3 grupos seguidos fallan, abortar
           if (consecutiveFails >= 3) {
             console.log(`[GRUPOS] 🛑 Circuit breaker: ${consecutiveFails} fallos consecutivos, abortando restantes`);
             fail += gids.length - ok - fail;
             break;
           }
 
-          const maxRetries = 1; // Reducido de 2 a 1 para no tardar tanto en timeouts
+          const maxRetries = 1;
           let sent = false;
           for (let attempt = 0; attempt <= maxRetries && !sent; attempt++) {
             try {
@@ -680,10 +683,9 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
               }
               if (attempt > 0) console.log(`[GRUPOS] 🔄 Retry #${attempt} para ${groups[gid]?.subject || gid}...`);
 
-              // Timeout de 15s para evitar bloqueos de minutos
               await Promise.race([
                 sg.sock.sendMessage(gid, payload),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 15s')), 15000))
+                new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout ${Math.round(GROUP_SEND_TIMEOUT_MS/1000)}s`)), GROUP_SEND_TIMEOUT_MS))
               ]);
 
               ok++;
@@ -691,15 +693,16 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
               consecutiveFails = 0;
               await new Promise(r => setTimeout(r, 2500 + Math.random()*1500));
             } catch(e) {
-              console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}) intento ${attempt}:`, e.message);
-              const msg = String(e.message || '');
-              if ((msg.includes('senderMessageKeys') || msg.includes('Bad MAC')) && !sg._senderKeysFixed) {
+              const errMsg = String(e?.message || e || 'Error desconocido');
+              console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}) intento ${attempt}:`, errMsg);
+
+              if ((errMsg.includes('senderMessageKeys') || errMsg.includes('Bad MAC')) && !sg._senderKeysFixed) {
                 sg._senderKeysFixed = true;
                 limpiarSenderKeys(grupoSesionId);
               }
-              // Si es timeout, no esperar mucho para reintentar
+
               if (attempt < maxRetries) {
-                const waitTime = e.message?.includes('Timeout') ? 2000 : (attempt + 1) * 3000;
+                const waitTime = errMsg.includes('Timeout') ? 6000 : (attempt + 1) * 4000;
                 console.log(`[GRUPOS] ⏳ Esperando ${waitTime/1000}s antes de reintentar...`);
                 await new Promise(r => setTimeout(r, waitTime));
               } else {
@@ -711,33 +714,29 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         }
         registrarPromoEnviada(caption, 'grupos', ok);
         return `✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}`;
-      } catch(e) { return '❌ Grupos: ' + e.message; }
+      } catch(e) { return '❌ Grupos: ' + (e?.message || e); }
   }
 
   // --- Función: publicar estado ---
   async function enviarEstado() {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
       if (!mediaBuffer) return '❌ Estado: necesito la imagen o video';
-      const grupoSesionId = process.env._GRUPO_OVERRIDE || 'grupos';
+
       const excludeForStatus = new Set(['personal']);
-      // Cuando el destino es AMBOS, no usar la misma sesión de grupos también para status
-      // porque genera competencia de cifrado/sender-keys en la misma cuenta.
       if (accion.tipo === 'ambos') excludeForStatus.add(grupoSesionId);
-      // Excluir sesión personal del envío de promos/marketing
+
       const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo && sesiones[id]?.sock && !excludeForStatus.has(id));
-      if (!targets.length) return '❌ Estado: no hay sesiones activas disponibles para publicar estado';
+      if (!targets.length) return '❌ Estado: no hay sesiones activas (o sockets desconectados)';
       console.log(`[ESTADO] 🎯 Sesiones target: ${targets.join(', ')} (excluidas: ${SESIONES_ACTIVAS.filter(id => !targets.includes(id)).join(', ')})`);
       let ok = 0, fail = 0;
       for (const sid of targets) {
         try {
           const ss = sesiones[sid];
-          // Null check robusto
           if (!ss?.sock?.sendMessage) {
             console.error(`[ESTADO] ❌ "${sid}" socket null o desconectado, saltando`);
             fail++;
             continue;
           }
-          // FIX v2: usar helper robusto para statusJidList
           const statusJidList = buildStatusJidList(ss, sesiones, SESIONES_ACTIVAS);
           if (!statusJidList.length) {
             console.error(`[ESTADO] ❌ "${sid}" sin contactos para statusJidList`);
@@ -754,18 +753,16 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           }
 
           console.log(`[ESTADO] Publicando via sesión "${sid}" (${ss.numero}) con ${statusJidList.length} contactos`);
-          // Timeout 20s para estado (es más pesado que grupos por la cantidad de contactos)
           await Promise.race([
             ss.sock.sendMessage('status@broadcast', payload, { statusJidList }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 20s')), 20000))
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout ${Math.round(STATUS_SEND_TIMEOUT_MS/1000)}s`)), STATUS_SEND_TIMEOUT_MS))
           ]);
           console.log(`[ESTADO] ✅ Publicado en "${sid}"`);
           ok++;
           await new Promise(r => setTimeout(r, 800));
         } catch(e) {
-          console.error(`[ESTADO] ❌ Error en "${sid}":`, e.message);
-          // Auto-recovery: limpiar sender keys corruptos y reintentar
-          const errMsg = String(e.message || '');
+          const errMsg = String(e?.message || e || 'Error desconocido');
+          console.error(`[ESTADO] ❌ Error en "${sid}":`, errMsg);
           if (errMsg.includes('senderMessageKeys') || errMsg.includes('Bad MAC')) {
             const cleaned = limpiarSenderKeys(sid);
             if (cleaned) {
@@ -782,13 +779,13 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
                 }
                 await Promise.race([
                   ss.sock.sendMessage('status@broadcast', retryPayload, { statusJidList }),
-                  new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 20s retry')), 20000))
+                  new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout ${Math.round(STATUS_SEND_TIMEOUT_MS/1000)}s retry`)), STATUS_SEND_TIMEOUT_MS))
                 ]);
                 console.log(`[ESTADO] ✅ Retry exitoso en "${sid}" después de limpiar sender keys`);
                 ok++;
                 continue;
               } catch(e2) {
-                console.error(`[ESTADO] ❌ Retry también falló en "${sid}":`, e2.message);
+                console.error(`[ESTADO] ❌ Retry también falló en "${sid}":`, e2?.message || e2);
               }
             }
           }
@@ -799,15 +796,12 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
       return `✅ Estado: ${ok} sesiones OK, ${fail} fallidas`;
   }
 
-  // --- Ejecutar: SIEMPRE secuencial ---
-  // Nota: correr grupos y estado en paralelo puede golpear la misma sesión a la vez
-  // (por ejemplo la cuenta "grupos"), provocando Bad MAC / sender-key corruption.
   if (accion.tipo === 'ambos') {
     const resGrupos = await enviarGrupos();
-    // Pequeña pausa para que WhatsApp termine de asentarse antes del status
-    await new Promise(r => setTimeout(r, 2500));
+    resultados.push(resGrupos);
+    await new Promise(r => setTimeout(r, BOTH_FLOW_PAUSE_MS));
     const resEstado = await enviarEstado();
-    resultados.push(resGrupos, resEstado);
+    resultados.push(resEstado);
   } else {
     for (const dest of destinos) {
       if (dest === 'grupos') resultados.push(await enviarGrupos());
