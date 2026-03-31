@@ -961,7 +961,7 @@ async function conectarSesion(sesionId) {
       const reconectar = code !== DisconnectReason.loggedOut;
       console.log(`[${sesionId}] Desconectado. Código: ${code}`);
 
-      // Track retry attempts for 515 loops
+      // Track retry attempts
       if (!s._retryCount) s._retryCount = 0;
 
       if (code === 515) {
@@ -975,10 +975,28 @@ async function conectarSesion(sesionId) {
         } else {
           setTimeout(() => conectarSesion(sesionId), 5000 * s._retryCount);
         }
+      } else if (code === 405) {
+        // 405 = WA rechaza conexión (protocolo/rate limit/conflicto de sesión)
+        s._retryCount++;
+        const MAX_405_RETRIES = 5;
+        // Backoff exponencial: 10s, 20s, 40s, 80s, 160s
+        const delay405 = Math.min(10000 * Math.pow(2, s._retryCount - 1), 180000);
+        console.log(`[${sesionId}] ⚠️ 405 Retry #${s._retryCount}/${MAX_405_RETRIES} — esperando ${Math.round(delay405/1000)}s`);
+        if (s._retryCount >= MAX_405_RETRIES) {
+          console.log(`[${sesionId}] ❌ Max reintentos 405 alcanzado. Sesión pausada — reconectar manualmente.`);
+          s._retryCount = 0;
+          s.reconectando = false;
+          // No reconectar automáticamente, esperar intervención manual
+        } else {
+          s.reconectando = true;
+          setTimeout(() => conectarSesion(sesionId), delay405);
+        }
       } else if (reconectar && !s.reconectando) {
         s._retryCount = 0;
         s.reconectando = true;
-        setTimeout(() => conectarSesion(sesionId), 5000);
+        // Delay escalonado para evitar reconexión simultánea de todas las sesiones
+        const staggerDelay = 5000 + (Object.keys(sesiones).indexOf(sesionId) * 3000);
+        setTimeout(() => conectarSesion(sesionId), staggerDelay);
       } else if (!reconectar) {
         s._retryCount = 0;
         try { fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
@@ -1971,6 +1989,23 @@ app.get('/sesion/:id/desconectar', auth, async (req, res) => {
   }
 });
 
+// Reconectar suave (sin borrar auth) — para recovery de 405
+app.get('/sesion/:id/reconectar-soft', auth, async (req, res) => {
+  const id = req.params.id;
+  const s = sesiones[id];
+  if (!s) return res.json({ ok: false, error: 'Sesión no existe' });
+
+  try {
+    if (s.sock) { try { s.sock.end(); } catch(e) {} s.sock = null; }
+    s.listo = false; s.qr = null; s.reconectando = false; s._retryCount = 0;
+    console.log(`[${id}] 🔄 Reconexión suave solicitada manualmente`);
+    setTimeout(() => conectarSesion(id), 2000);
+    res.redirect('/');
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 //  RUTAS — ENVÍO
 // ═══════════════════════════════════════════════════════════════
@@ -2239,7 +2274,11 @@ app.listen(PORT, () => {
   for (let i = 0; i < ids.length; i++) {
     console.log(`[BOOT] Iniciando sesión: ${ids[i]}...`);
     await conectarSesion(ids[i]).catch(e => console.error(`[BOOT] Error ${ids[i]}:`, e.message));
-    if (i < ids.length - 1) await new Promise(r => setTimeout(r, 3000));
+    if (i < ids.length - 1) {
+      const stagger = 5000 + Math.random() * 3000;
+      console.log(`[BOOT] ⏳ Esperando ${Math.round(stagger/1000)}s antes de siguiente sesión...`);
+      await new Promise(r => setTimeout(r, stagger));
+    }
   }
   console.log('[BOOT] ✅ Sesiones iniciadas');
 
