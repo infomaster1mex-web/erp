@@ -652,12 +652,18 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
       const sg = sesiones[grupoSesionId] || sesiones['grupos'] || sesiones[sesionId];
       if (!sg?.listo || !sg?.sock?.sendMessage) return '❌ Grupos: sesión no conectada o socket muerto';
       try {
-        const groups = await sg.sock.groupFetchAllParticipating();
-        const gids = Object.keys(groups);
-        if (!gids.length) return '❌ Grupos: no hay grupos';
-        console.log(`[GRUPOS] 📋 ${gids.length} grupos encontrados:`, gids.map(g => `${groups[g]?.subject || g}`).join(', '));
+        const { groups, omitidos, rawCount } = await obtenerGruposActivos(sg.sock, sg.numero);
+        const gids = groups.map(g => g.id);
+        if (!gids.length) {
+          const detalle = omitidos.slice(0, 5).map(g => g.nombre || g.id).join(', ');
+          return `❌ Grupos: no hay grupos válidos${detalle ? ` (omitidos: ${detalle})` : ''}`;
+        }
+        console.log(`[GRUPOS] 📋 ${gids.length} grupos válidos de ${rawCount}:`, groups.map(g => `${g.subject || g.id}`).join(', '));
+        if (omitidos.length) {
+          console.log('[GRUPOS] 🚫 Omitidos:', omitidos.map(g => `${g.nombre || g.id} [${g.razon}]`).join(' | '));
+        }
         console.log(`[GRUPOS] 📦 Payload: mediaType=${mediaType}, bufferSize=${mediaBuffer?.length || 0}, caption=${caption?.length || 0} chars, timeout=${GROUP_SEND_TIMEOUT_MS}ms`);
-        await replyFn(`📤 Enviando a ${gids.length} grupos...`);
+        await replyFn(`📤 Enviando a ${gids.length} grupos válidos${rawCount !== gids.length ? ` (detectados ${rawCount}, omitidos ${rawCount - gids.length})` : ''}...`);
         let ok = 0, fail = 0;
         let consecutiveFails = 0;
 
@@ -681,7 +687,7 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
               } else {
                 payload = { text: caption };
               }
-              if (attempt > 0) console.log(`[GRUPOS] 🔄 Retry #${attempt} para ${groups[gid]?.subject || gid}...`);
+              if (attempt > 0) console.log(`[GRUPOS] 🔄 Retry #${attempt} para ${(groups.find(x => x.id === gid)?.subject) || gid}...`);
 
               await Promise.race([
                 sg.sock.sendMessage(gid, payload),
@@ -694,7 +700,7 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
               await new Promise(r => setTimeout(r, 2500 + Math.random()*1500));
             } catch(e) {
               const errMsg = String(e?.message || e || 'Error desconocido');
-              console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}) intento ${attempt}:`, errMsg);
+              console.error(`[GRUPOS] ❌ Error en ${gid} (${(groups.find(x => x.id === gid)?.subject) || 'sin nombre'}) intento ${attempt}:`, errMsg);
 
               if ((errMsg.includes('senderMessageKeys') || errMsg.includes('Bad MAC')) && !sg._senderKeysFixed) {
                 sg._senderKeysFixed = true;
@@ -713,7 +719,7 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           }
         }
         registrarPromoEnviada(caption, 'grupos', ok);
-        return `✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}`;
+        return `✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}${rawCount !== gids.length ? ` (filtrados ${rawCount - gids.length})` : ''}`;
       } catch(e) { return '❌ Grupos: ' + (e?.message || e); }
   }
 
@@ -924,6 +930,89 @@ function limpiarSenderKeys(sesionId) {
     console.error(`[FIX] Error limpiando sender-keys de "${sesionId}":`, e.message);
     return 0;
   }
+}
+
+
+function jidANumero(jid) {
+  return String(jid || '').split('@')[0].replace(/\D/g, '');
+}
+
+async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
+  const validateMeta = opts.validateMeta ?? (String(process.env.GROUP_VALIDATE_METADATA || 'true').toLowerCase() !== 'false');
+  const skipCommunities = opts.skipCommunities ?? (String(process.env.GROUP_SKIP_COMMUNITIES || 'true').toLowerCase() !== 'false');
+  const metaTimeoutMs = Number(opts.metaTimeoutMs || process.env.GROUP_META_VALIDATE_TIMEOUT_MS || 4000);
+
+  const raw = await sock.groupFetchAllParticipating();
+  const entries = Object.entries(raw || {});
+  const propios = jidANumero(numeroSesion || sock?.user?.id);
+  const preliminares = [];
+  const omitidos = [];
+
+  for (const [gid, g] of entries) {
+    const subject = String(g?.subject || '').trim();
+    const participants = Array.isArray(g?.participants) ? g.participants : [];
+
+    if (!gid || !gid.endsWith('@g.us')) {
+      omitidos.push({ id: gid, nombre: subject || gid, razon: 'jid no es grupo' });
+      continue;
+    }
+    if (!subject || subject.toLowerCase() === 'cargando...') {
+      omitidos.push({ id: gid, nombre: subject || gid, razon: 'sin nombre válido' });
+      continue;
+    }
+    if (skipCommunities && (g?.isCommunity || g?.isCommunityAnnounce)) {
+      omitidos.push({ id: gid, nombre: subject, razon: g?.isCommunity ? 'community padre' : 'community announce' });
+      continue;
+    }
+    if (!participants.length) {
+      omitidos.push({ id: gid, nombre: subject, razon: 'sin participantes en cache' });
+      continue;
+    }
+
+    preliminares.push({
+      id: gid,
+      nombre: subject,
+      participantes: participants,
+      descripcion: g?.desc || '',
+      raw: g,
+    });
+  }
+
+  if (!validateMeta) {
+    return {
+      groups: preliminares.map(g => ({ ...g.raw, id: g.id, subject: g.nombre, participants: g.participantes, desc: g.descripcion })),
+      omitidos,
+      rawCount: entries.length,
+    };
+  }
+
+  const grupos = [];
+  for (const g of preliminares) {
+    try {
+      const meta = await Promise.race([
+        sock.groupMetadata(g.id),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`metadata timeout ${metaTimeoutMs}ms`)), metaTimeoutMs)),
+      ]);
+      const participants = Array.isArray(meta?.participants) ? meta.participants : g.participantes;
+      const sigoDentro = !propios || participants.some(p => jidANumero(p?.id || p?.jid || p) === propios);
+      if (!meta?.subject || !sigoDentro) {
+        omitidos.push({ id: g.id, nombre: g.nombre, razon: !meta?.subject ? 'metadata sin subject' : 'la sesión ya no figura dentro del grupo' });
+        continue;
+      }
+      grupos.push({
+        ...g.raw,
+        ...meta,
+        id: g.id,
+        subject: String(meta.subject || g.nombre).trim(),
+        participants,
+        desc: meta?.desc || g.descripcion || '',
+      });
+    } catch (e) {
+      omitidos.push({ id: g.id, nombre: g.nombre, razon: `metadata inválida: ${String(e?.message || e)}` });
+    }
+  }
+
+  return { groups: grupos, omitidos, rawCount: entries.length };
 }
 
 const NOMBRES_FILE = path.join(__dirname, 'auth_info', 'personal', 'nombres_cache.json');
@@ -1216,8 +1305,8 @@ async function conectarSesion(sesionId) {
                 if (destino === 'grupos' || destino === 'ambos') {
                   const sg = sesiones[process.env._GRUPO_OVERRIDE || 'grupos'] || sesiones['avisos'];
                   if (sg?.listo) {
-                    const groups = await sg.sock.groupFetchAllParticipating();
-                    const gids = Object.keys(groups);
+                    const { groups } = await obtenerGruposActivos(sg.sock, sg.numero);
+                    const gids = groups.map(g => g.id);
                     let ok = 0;
                     for (const gid of gids) {
                       try {
@@ -1412,8 +1501,8 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                       try {
                         const sg = sesiones[process.env._GRUPO_OVERRIDE || 'grupos'] || sesiones['avisos'];
                         if (sg?.listo) {
-                          const groups = await sg.sock.groupFetchAllParticipating();
-                          const gids = Object.keys(groups);
+                          const { groups } = await obtenerGruposActivos(sg.sock, sg.numero);
+                          const gids = groups.map(g => g.id);
                           let ok = 0;
                           for (const gid of gids) {
                             try {
@@ -1628,12 +1717,15 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
               if (!sg?.listo) continue;
               
               try {
-                const groups = await sg.sock.groupFetchAllParticipating();
-                const gids = Object.keys(groups);
+                const { groups, rawCount, omitidos } = await obtenerGruposActivos(sg.sock, sg.numero);
+                const gids = groups.map(g => g.id);
                 if (!gids.length) continue;
                 
                 const testGid = gids[0];
-                const testName = groups[testGid]?.subject || testGid;
+                const testName = groups.find(g => g.id === testGid)?.subject || testGid;
+                if (rawCount !== gids.length) {
+                  await reply(`🧹 *${testSid}*: detectados ${rawCount}, válidos ${gids.length}, omitidos ${rawCount - gids.length}`);
+                }
                 await reply(`🧪 Probando con sesión *${testSid}* (${sg.numero}) → *${testName}*...`);
                 
                 try {
@@ -2284,14 +2376,14 @@ app.get('/grupos/lista', auth, async (req, res) => {
   if (!s?.listo) return res.json({ ok: false, error: 'Bot grupos no conectado' });
 
   try {
-    const groups = await s.sock.groupFetchAllParticipating();
-    const lista = Object.values(groups).map(g => ({
-      id:           g.id,
-      nombre:       g.subject,
+    const { groups, omitidos, rawCount } = await obtenerGruposActivos(s.sock, s.numero);
+    const lista = groups.map(g => ({
+      id:            g.id,
+      nombre:        g.subject,
       participantes: g.participants?.length || 0,
-      descripcion:  g.desc || '',
+      descripcion:   g.desc || '',
     }));
-    res.json({ ok: true, grupos: lista, total: lista.length });
+    res.json({ ok: true, grupos: lista, total: lista.length, detectados: rawCount, omitidos: omitidos.length });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
