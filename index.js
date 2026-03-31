@@ -644,7 +644,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
     if (dest === 'grupos') {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
       if (!mediaBuffer && !caption) { resultados.push('❌ Grupos: necesito al menos texto o imagen'); continue; }
-      const sg = sesiones['grupos'] || sesiones[sesionId];
+      const grupoSesionId = process.env._GRUPO_OVERRIDE || 'grupos';
+      const sg = sesiones[grupoSesionId] || sesiones['grupos'] || sesiones[sesionId];
       if (!sg?.listo) { resultados.push('❌ Grupos: sesión no conectada'); continue; }
       try {
         const groups = await sg.sock.groupFetchAllParticipating();
@@ -656,45 +657,36 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         let ok = 0, fail = 0;
 
         for (const gid of gids) {
-          try {
-            let payload;
-            if (mediaType === 'video' && mediaBuffer) {
-              payload = { video: mediaBuffer, mimetype: 'video/mp4', ...(caption ? { caption } : {}) };
-            } else if (mediaBuffer) {
-              const isJpeg = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
-              payload = { image: mediaBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
-            } else {
-              payload = { text: caption };
-            }
-            await sg.sock.sendMessage(gid, payload);
-            ok++;
-            await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
-          } catch(e) {
-            console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}):`, e.message);
-            fail++;
-            // Auto-recovery: si es error de senderMessageKeys corruptos
-            if (e.message?.includes('senderMessageKeys') && !sg._senderKeysFixed) {
-              sg._senderKeysFixed = true;
-              const cleaned = limpiarSenderKeys('grupos');
-              if (cleaned) {
-                console.log(`[GRUPOS] 🔄 Sender keys limpiadas, reintentando desde este grupo...`);
-                // Reintentar este grupo después de limpiar
-                try {
-                  let retryPayload;
-                  if (mediaType === 'video' && mediaBuffer) {
-                    retryPayload = { video: mediaBuffer, mimetype: 'video/mp4', ...(caption ? { caption } : {}) };
-                  } else if (mediaBuffer) {
-                    const isJpeg2 = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
-                    retryPayload = { image: mediaBuffer, mimetype: isJpeg2 ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
-                  } else {
-                    retryPayload = { text: caption };
-                  }
-                  await sg.sock.sendMessage(gid, retryPayload);
-                  fail--; ok++;
-                  console.log(`[GRUPOS] ✅ Retry exitoso en ${groups[gid]?.subject || gid}`);
-                } catch(e2) {
-                  console.error(`[GRUPOS] ❌ Retry también falló:`, e2.message);
-                }
+          const maxRetries = 2;
+          let sent = false;
+          for (let attempt = 0; attempt <= maxRetries && !sent; attempt++) {
+            try {
+              let payload;
+              if (mediaType === 'video' && mediaBuffer) {
+                payload = { video: mediaBuffer, mimetype: 'video/mp4', ...(caption ? { caption } : {}) };
+              } else if (mediaBuffer) {
+                const isJpeg = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
+                payload = { image: mediaBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
+              } else {
+                payload = { text: caption };
+              }
+              if (attempt > 0) console.log(`[GRUPOS] 🔄 Retry #${attempt} para ${groups[gid]?.subject || gid}...`);
+              await sg.sock.sendMessage(gid, payload);
+              ok++;
+              sent = true;
+              await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
+            } catch(e) {
+              console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}) intento ${attempt}:`, e.message);
+              if (e.message?.includes('senderMessageKeys') && !sg._senderKeysFixed) {
+                sg._senderKeysFixed = true;
+                limpiarSenderKeys('grupos');
+              }
+              if (attempt < maxRetries) {
+                const waitTime = (attempt + 1) * 5000;
+                console.log(`[GRUPOS] ⏳ Esperando ${waitTime/1000}s antes de reintentar...`);
+                await new Promise(r => setTimeout(r, waitTime));
+              } else {
+                fail++;
               }
             }
           }
@@ -1134,7 +1126,7 @@ async function conectarSesion(sesionId) {
                   console.log(`[personal] ✅ Estado publicado en PERSONAL (${statusJidList.length} contactos)`);
                 }
                 if (destino === 'grupos' || destino === 'ambos') {
-                  const sg = sesiones['grupos'] || sesiones['avisos'];
+                  const sg = sesiones[process.env._GRUPO_OVERRIDE || 'grupos'] || sesiones['avisos'];
                   if (sg?.listo) {
                     const groups = await sg.sock.groupFetchAllParticipating();
                     const gids = Object.keys(groups);
@@ -1330,7 +1322,7 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
                     }
                     if (dest === 'grupos' || dest === 'ambos') {
                       try {
-                        const sg = sesiones['grupos'] || sesiones['avisos'];
+                        const sg = sesiones[process.env._GRUPO_OVERRIDE || 'grupos'] || sesiones['avisos'];
                         if (sg?.listo) {
                           const groups = await sg.sock.groupFetchAllParticipating();
                           const gids = Object.keys(groups);
@@ -1539,54 +1531,71 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
             continue;
           }
           if (textoCmds === '!test-grupos' || textoCmds === '!test') {
-            const sg = sesiones['grupos'] || sesiones[sesionId];
-            if (!sg?.listo) { await reply('❌ Sesión de grupos no conectada'); continue; }
-            try {
-              const groups = await sg.sock.groupFetchAllParticipating();
-              const gids = Object.keys(groups);
-              if (!gids.length) { await reply('❌ No hay grupos'); continue; }
-              const testGid = gids[0];
-              const testName = groups[testGid]?.subject || testGid;
-              await reply(`🧪 Probando envío a: *${testName}*...`);
+            // Probar con TODAS las sesiones para encontrar cuál puede enviar a grupos
+            const sesionesAProbar = ['grupos', ...SESIONES_ACTIVAS.filter(id => id !== 'grupos' && id !== 'personal')];
+            let algunoFunciono = false;
+            
+            for (const testSid of sesionesAProbar) {
+              const sg = sesiones[testSid];
+              if (!sg?.listo) continue;
               
-              // Test 1: texto simple
               try {
-                await sg.sock.sendMessage(testGid, { text: '🧪 Test de envío — SOS Digital Bot' });
-                await reply(`✅ Test 1 (texto): OK en *${testName}*`);
-              } catch(e1) {
-                await reply(`❌ Test 1 (texto): ${e1.message}`);
-              }
-              
-              // Test 2: si hay imagen pendiente
-              if (adminPending.imgBuffer) {
-                await new Promise(r => setTimeout(r, 3000));
-                try {
-                  const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
-                  await sg.sock.sendMessage(testGid, { 
-                    image: adminPending.imgBuffer, 
-                    mimetype: isJpeg ? 'image/jpeg' : 'image/png'
-                  });
-                  await reply(`✅ Test 2 (imagen sin caption): OK`);
-                } catch(e2) {
-                  await reply(`❌ Test 2 (imagen sin caption): ${e2.message}`);
-                }
+                const groups = await sg.sock.groupFetchAllParticipating();
+                const gids = Object.keys(groups);
+                if (!gids.length) continue;
                 
-                await new Promise(r => setTimeout(r, 3000));
+                const testGid = gids[0];
+                const testName = groups[testGid]?.subject || testGid;
+                await reply(`🧪 Probando con sesión *${testSid}* (${sg.numero}) → *${testName}*...`);
+                
                 try {
-                  const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
-                  await sg.sock.sendMessage(testGid, { 
-                    image: adminPending.imgBuffer, 
-                    mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-                    caption: '🧪 Test con caption'
-                  });
-                  await reply(`✅ Test 3 (imagen + caption): OK`);
-                } catch(e3) {
-                  await reply(`❌ Test 3 (imagen + caption): ${e3.message}`);
+                  await sg.sock.sendMessage(testGid, { text: '🧪 Test — SOS Digital Bot' });
+                  await reply(`✅ *${testSid}*: TEXTO OK en *${testName}*`);
+                  algunoFunciono = true;
+                  
+                  // Si hay imagen, probar también
+                  if (adminPending.imgBuffer) {
+                    await new Promise(r => setTimeout(r, 3000));
+                    try {
+                      const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
+                      await sg.sock.sendMessage(testGid, { 
+                        image: adminPending.imgBuffer, 
+                        mimetype: isJpeg ? 'image/jpeg' : 'image/png',
+                        caption: '🧪 Test imagen'
+                      });
+                      await reply(`✅ *${testSid}*: IMAGEN OK`);
+                    } catch(e2) {
+                      await reply(`❌ *${testSid}*: imagen falló: ${e2.message}`);
+                    }
+                  }
+                  
+                  // Si encontramos una que funciona y no es 'grupos', sugerir cambio
+                  if (testSid !== 'grupos') {
+                    await reply(`💡 La sesión *${testSid}* SÍ puede enviar a grupos. Para usarla, manda:\n*!usar-sesion ${testSid}*`);
+                  }
+                  break; // Ya encontramos una que funciona
+                } catch(e1) {
+                  await reply(`❌ *${testSid}*: ${e1.message}`);
                 }
-              } else {
-                await reply('ℹ️ No hay imagen cargada, solo probé texto.');
+              } catch(e) {
+                continue; // Esta sesión no tiene grupos
               }
-            } catch(e) { await reply('❌ Error: ' + e.message); }
+            }
+            
+            if (!algunoFunciono) {
+              await reply('❌ Ninguna sesión pudo enviar a grupos. Opciones:\n1. Espera 10-15 min más (la sesión puede estar sincronizando)\n2. Manda un mensaje manual desde el teléfono a un grupo\n3. *!reauth-grupos* para re-vincular');
+            }
+            continue;
+          }
+          if (textoCmds.startsWith('!usar-sesion')) {
+            const nuevaSesion = textoCmds.split(' ')[1]?.trim();
+            if (!nuevaSesion || !sesiones[nuevaSesion]) {
+              await reply('❌ Uso: *!usar-sesion avisos* (o cualquier sesión activa)');
+              continue;
+            }
+            // Cambiar la sesión preferida para grupos en runtime
+            process.env._GRUPO_OVERRIDE = nuevaSesion;
+            await reply(`✅ Grupos ahora se enviarán via sesión *${nuevaSesion}* (${sesiones[nuevaSesion]?.numero || '?'})`);
             continue;
           }
           if (textoCmds === '!reauth' || textoCmds === '!reauth-grupos') {
