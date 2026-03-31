@@ -8,7 +8,6 @@ import {
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
 } from '@whiskeysockets/baileys';
 
 import express from 'express';
@@ -907,10 +906,8 @@ async function conectarSesion(sesionId) {
   console.log(`[${sesionId}] Desglose: ${waCount} @s.whatsapp.net + ${lidCount} @lid`);
 
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
-  const { version }          = await fetchLatestBaileysVersion();
 
   s.sock = makeWASocket({
-    version,
     auth:   state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
