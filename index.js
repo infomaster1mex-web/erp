@@ -1614,6 +1614,58 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           }
           continue;
         }
+        if (textoCmds === '!test-grupos' || textoCmds === '!test') {
+          const sg = sesiones['grupos'] || sesiones[sesionId];
+          if (!sg?.listo) { await reply('❌ Sesión de grupos no conectada'); continue; }
+          try {
+            const groups = await sg.sock.groupFetchAllParticipating();
+            const gids = Object.keys(groups);
+            if (!gids.length) { await reply('❌ No hay grupos'); continue; }
+            const testGid = gids[0];
+            const testName = groups[testGid]?.subject || testGid;
+            await reply(`🧪 Probando envío de texto a: *${testName}*...`);
+            
+            // Test 1: texto simple
+            try {
+              await sg.sock.sendMessage(testGid, { text: '🧪 Test de envío — SOS Digital Bot' });
+              await reply(`✅ Test 1 (texto): OK en *${testName}*`);
+            } catch(e1) {
+              await reply(`❌ Test 1 (texto): ${e1.message}`);
+            }
+            
+            // Test 2: si hay imagen pendiente, probar imagen sola sin caption
+            if (adminPending.imgBuffer) {
+              await new Promise(r => setTimeout(r, 3000));
+              try {
+                const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
+                await sg.sock.sendMessage(testGid, { 
+                  image: adminPending.imgBuffer, 
+                  mimetype: isJpeg ? 'image/jpeg' : 'image/png'
+                });
+                await reply(`✅ Test 2 (imagen sin caption): OK`);
+              } catch(e2) {
+                await reply(`❌ Test 2 (imagen sin caption): ${e2.message}`);
+              }
+              
+              // Test 3: imagen con caption corto
+              await new Promise(r => setTimeout(r, 3000));
+              try {
+                const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
+                await sg.sock.sendMessage(testGid, { 
+                  image: adminPending.imgBuffer, 
+                  mimetype: isJpeg ? 'image/jpeg' : 'image/png',
+                  caption: '🧪 Test con caption corto'
+                });
+                await reply(`✅ Test 3 (imagen + caption corto): OK`);
+              } catch(e3) {
+                await reply(`❌ Test 3 (imagen + caption corto): ${e3.message}`);
+              }
+            } else {
+              await reply('ℹ️ No hay imagen cargada, solo probé texto. Manda una imagen primero para probar envío con imagen.');
+            }
+          } catch(e) { await reply('❌ Error: ' + e.message); }
+          continue;
+        }
         if (textoCmds === '!ayuda' || textoCmds === '!help' || textoCmds === 'ayuda') {
           await reply(
             '🤖 *Agente de Marketing SOS Digital*\n\n' +
