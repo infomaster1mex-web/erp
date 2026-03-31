@@ -1512,6 +1512,181 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           continue;
         }
 
+        // ═══ COMANDOS ! — siempre se procesan primero, antes de estados pendientes o IA ═══
+        if (!tieneMedia && texto && texto.startsWith('!')) {
+          const textoCmds = texto.toLowerCase().trim();
+          
+          if (textoCmds === '!reset' || textoCmds === '!reiniciar') {
+            adminChat.length = 0;
+            adminPending.accion = null;
+            resetMediaBuffer();
+            await reply('🔄 Historial limpiado. ¡Empezamos de cero!\n\nPuedes decirme:\n• "hazme una imagen de Disney+ a $35"\n• "manda una promo a los grupos"\n• "dame el reporte"\n• "programa una promo diaria a las 9am"');
+            continue;
+          }
+          if (textoCmds === '!fix' || textoCmds === '!fix-grupos') {
+            let totalCleaned = 0;
+            const results = [];
+            for (const sid of SESIONES_ACTIVAS) {
+              const cleaned = limpiarSenderKeys(sid);
+              totalCleaned += cleaned;
+              if (cleaned) results.push(`🧹 *${sid}*: ${cleaned} archivos limpiados`);
+            }
+            if (totalCleaned) {
+              await reply(`🔧 *Sender keys reparadas*\n\n${results.join('\n')}\n\n_Intenta enviar de nuevo._`);
+            } else {
+              await reply('✅ No se encontraron sender keys corruptas. Todo limpio.');
+            }
+            continue;
+          }
+          if (textoCmds === '!test-grupos' || textoCmds === '!test') {
+            const sg = sesiones['grupos'] || sesiones[sesionId];
+            if (!sg?.listo) { await reply('❌ Sesión de grupos no conectada'); continue; }
+            try {
+              const groups = await sg.sock.groupFetchAllParticipating();
+              const gids = Object.keys(groups);
+              if (!gids.length) { await reply('❌ No hay grupos'); continue; }
+              const testGid = gids[0];
+              const testName = groups[testGid]?.subject || testGid;
+              await reply(`🧪 Probando envío a: *${testName}*...`);
+              
+              // Test 1: texto simple
+              try {
+                await sg.sock.sendMessage(testGid, { text: '🧪 Test de envío — SOS Digital Bot' });
+                await reply(`✅ Test 1 (texto): OK en *${testName}*`);
+              } catch(e1) {
+                await reply(`❌ Test 1 (texto): ${e1.message}`);
+              }
+              
+              // Test 2: si hay imagen pendiente
+              if (adminPending.imgBuffer) {
+                await new Promise(r => setTimeout(r, 3000));
+                try {
+                  const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
+                  await sg.sock.sendMessage(testGid, { 
+                    image: adminPending.imgBuffer, 
+                    mimetype: isJpeg ? 'image/jpeg' : 'image/png'
+                  });
+                  await reply(`✅ Test 2 (imagen sin caption): OK`);
+                } catch(e2) {
+                  await reply(`❌ Test 2 (imagen sin caption): ${e2.message}`);
+                }
+                
+                await new Promise(r => setTimeout(r, 3000));
+                try {
+                  const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
+                  await sg.sock.sendMessage(testGid, { 
+                    image: adminPending.imgBuffer, 
+                    mimetype: isJpeg ? 'image/jpeg' : 'image/png',
+                    caption: '🧪 Test con caption'
+                  });
+                  await reply(`✅ Test 3 (imagen + caption): OK`);
+                } catch(e3) {
+                  await reply(`❌ Test 3 (imagen + caption): ${e3.message}`);
+                }
+              } else {
+                await reply('ℹ️ No hay imagen cargada, solo probé texto.');
+              }
+            } catch(e) { await reply('❌ Error: ' + e.message); }
+            continue;
+          }
+          if (textoCmds === '!reauth' || textoCmds === '!reauth-grupos') {
+            const targetSesion = textoCmds.includes('grupos') ? 'grupos' : sesionId;
+            await reply(`⚠️ Borrando auth de "${targetSesion}" y reconectando...\nTendrás que escanear QR de nuevo en el panel web.`);
+            const ts = sesiones[targetSesion];
+            if (ts) {
+              try { if (ts.sock) { ts.sock.end(); ts.sock = null; } } catch(e) {}
+              ts.listo = false; ts.qr = null; ts.numero = null;
+              const authDir = path.join(__dirname, 'auth_info', targetSesion);
+              // Guardar contacts_cache antes de borrar
+              const contactsFile = path.join(authDir, 'contacts_cache.json');
+              let savedContacts = null;
+              try { if (fs.existsSync(contactsFile)) savedContacts = fs.readFileSync(contactsFile, 'utf8'); } catch(e) {}
+              try { fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
+              // Restaurar contacts_cache
+              if (savedContacts) {
+                try {
+                  fs.mkdirSync(authDir, { recursive: true });
+                  fs.writeFileSync(contactsFile, savedContacts);
+                } catch(e) {}
+              }
+              setTimeout(() => conectarSesion(targetSesion), 2000);
+              await reply(`🔄 Sesión "${targetSesion}" reiniciándose. Escanea el QR en:\nhttps://erp-production-24ab.up.railway.app/`);
+            }
+            continue;
+          }
+          if (textoCmds === '!ayuda' || textoCmds === '!help') {
+            await reply(
+              '🤖 *Agente de Marketing SOS Digital*\n\n' +
+              '📌 *Ejemplos de lo que puedes pedirme:*\n\n' +
+              '🎨 "hazme una imagen de Disney+ a $35"\n' +
+              '📤 "manda esta promo a los grupos"\n' +
+              '📸 "súbelo como estado/story"\n' +
+              '🔄 "mándalo a grupos y estado"\n' +
+              '⏰ "programa esto para las 6pm todos los días"\n' +
+              '📊 "dame el reporte de sesiones"\n\n' +
+              '📦 *Múltiples archivos:* Manda 2+ imágenes seguidas.\n\n' +
+              '🔧 *Comandos:*\n' +
+              '• *!test* — probar envío a 1 grupo\n' +
+              '• *!fix* — reparar sender keys corruptas\n' +
+              '• *!reauth-grupos* — re-escanear QR de grupos\n' +
+              '• *!reset* — limpiar historial del bot\n' +
+              '• *!contactos* — diagnóstico de contactos\n' +
+              '• *!estado* — ver programaciones activas\n' +
+              '• *!modelo* — ver/cambiar modelo de imágenes'
+            );
+            continue;
+          }
+          if (textoCmds === '!estado' || textoCmds === '!schedules') {
+            const schedules = cargarSchedules();
+            if (!schedules.length) {
+              await reply('⏰ No hay programaciones activas.');
+            } else {
+              const lines = ['⏰ *Programaciones activas:*\n'];
+              schedules.forEach(s => {
+                lines.push(`• [${s.id}]\n  📌 ${s.descripcion}\n  🕐 ${s.recurrente ? 'Diario a las '+s.hora : 'Una vez en '+s.minutos+' min'}\n  📤 Destino: ${s.destino}`);
+              });
+              lines.push('\nPara cancelar di: _"cancela [ID]"_');
+              await reply(lines.join('\n'));
+            }
+            continue;
+          }
+          if (textoCmds === '!contactos' || textoCmds === '!diagnostico') {
+            const lines = ['🔍 *Diagnóstico de contactos:*\n'];
+            for (const sid of SESIONES_ACTIVAS) {
+              const ss = sesiones[sid];
+              if (!ss) continue;
+              const waC = ss.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@s.whatsapp.net')).length : 0;
+              const lidC = ss.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@lid')).length : 0;
+              lines.push(`${ss.listo?'🟢':'🔴'} *${sid}*: ${waC} wa + ${lidC} lid = ${ss.contactos?.size || 0} total`);
+            }
+            const testJidList = buildStatusJidList(sesiones['personal'] || sesiones[SESIONES_ACTIVAS[0]], sesiones, SESIONES_ACTIVAS);
+            lines.push(`\n📊 *statusJidList combinado:* ${testJidList.length} contactos`);
+            await reply(lines.join('\n'));
+            continue;
+          }
+          if (textoCmds.startsWith('!modelo')) {
+            const partes = textoCmds.split(' ');
+            const nuevoModelo = partes[1]?.toLowerCase();
+            const modelosValidos = Object.keys(MODELOS_INFO);
+            if (!nuevoModelo || !modelosValidos.includes(nuevoModelo)) {
+              const lista = modelosValidos.map(m => {
+                const info = MODELOS_INFO[m];
+                const tieneKey = m === 'dalle3' ? !!OPENAI_KEY : m === 'gemini' ? !!GEMINI_KEY : m === 'stability' ? !!STABILITY_KEY : !!FAL_KEY;
+                const activo = m === modeloImagenActual ? ' ← *activo*' : '';
+                const keyStatus = tieneKey ? '✅' : '❌ (falta key)';
+                return `${info.emoji} *${m}* — ${info.nombre} ${keyStatus}${activo}`;
+              }).join('\n');
+              await reply(`🎨 *Modelos de imagen disponibles:*\n\n${lista}\n\n_Usa: !modelo dalle3 | !modelo gemini | !modelo stability | !modelo flux_`);
+            } else {
+              modeloImagenActual = nuevoModelo;
+              const info = MODELOS_INFO[nuevoModelo];
+              await reply(`${info.emoji} Modelo cambiado a *${info.nombre}*`);
+            }
+            continue;
+          }
+          // Comando ! no reconocido — dejar que la IA lo maneje
+        }
+
         if (!tieneMedia && texto && adminPending.accion?.tipo === 'esperar_destino_multiple') {
           const textoLower = texto.toLowerCase().trim();
           let destinoElegido = null;
@@ -1592,152 +1767,16 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
         }
 
         const textoCmds = texto.toLowerCase().trim();
-        if (textoCmds === '!reset' || textoCmds === 'reset' || textoCmds === '!reiniciar') {
+        // "reset" y "ayuda" sin ! también funcionan
+        if (textoCmds === 'reset') {
           adminChat.length = 0;
           adminPending.accion = null;
           resetMediaBuffer();
-          await reply('🔄 Historial limpiado. ¡Empezamos de cero!\n\nPuedes decirme:\n• "hazme una imagen de Disney+ a $35"\n• "manda una promo a los grupos"\n• "dame el reporte"\n• "programa una promo diaria a las 9am"');
+          await reply('🔄 Historial limpiado. ¡Empezamos de cero!');
           continue;
         }
-        if (textoCmds === '!fix' || textoCmds === '!fix-grupos') {
-          let totalCleaned = 0;
-          const results = [];
-          for (const sid of SESIONES_ACTIVAS) {
-            const cleaned = limpiarSenderKeys(sid);
-            totalCleaned += cleaned;
-            if (cleaned) results.push(`🧹 *${sid}*: ${cleaned} archivos limpiados`);
-          }
-          if (totalCleaned) {
-            await reply(`🔧 *Sender keys reparadas*\n\n${results.join('\n')}\n\n_Intenta enviar de nuevo._`);
-          } else {
-            await reply('✅ No se encontraron sender keys corruptas. Todo limpio.');
-          }
-          continue;
-        }
-        if (textoCmds === '!test-grupos' || textoCmds === '!test') {
-          const sg = sesiones['grupos'] || sesiones[sesionId];
-          if (!sg?.listo) { await reply('❌ Sesión de grupos no conectada'); continue; }
-          try {
-            const groups = await sg.sock.groupFetchAllParticipating();
-            const gids = Object.keys(groups);
-            if (!gids.length) { await reply('❌ No hay grupos'); continue; }
-            const testGid = gids[0];
-            const testName = groups[testGid]?.subject || testGid;
-            await reply(`🧪 Probando envío de texto a: *${testName}*...`);
-            
-            // Test 1: texto simple
-            try {
-              await sg.sock.sendMessage(testGid, { text: '🧪 Test de envío — SOS Digital Bot' });
-              await reply(`✅ Test 1 (texto): OK en *${testName}*`);
-            } catch(e1) {
-              await reply(`❌ Test 1 (texto): ${e1.message}`);
-            }
-            
-            // Test 2: si hay imagen pendiente, probar imagen sola sin caption
-            if (adminPending.imgBuffer) {
-              await new Promise(r => setTimeout(r, 3000));
-              try {
-                const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
-                await sg.sock.sendMessage(testGid, { 
-                  image: adminPending.imgBuffer, 
-                  mimetype: isJpeg ? 'image/jpeg' : 'image/png'
-                });
-                await reply(`✅ Test 2 (imagen sin caption): OK`);
-              } catch(e2) {
-                await reply(`❌ Test 2 (imagen sin caption): ${e2.message}`);
-              }
-              
-              // Test 3: imagen con caption corto
-              await new Promise(r => setTimeout(r, 3000));
-              try {
-                const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
-                await sg.sock.sendMessage(testGid, { 
-                  image: adminPending.imgBuffer, 
-                  mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-                  caption: '🧪 Test con caption corto'
-                });
-                await reply(`✅ Test 3 (imagen + caption corto): OK`);
-              } catch(e3) {
-                await reply(`❌ Test 3 (imagen + caption corto): ${e3.message}`);
-              }
-            } else {
-              await reply('ℹ️ No hay imagen cargada, solo probé texto. Manda una imagen primero para probar envío con imagen.');
-            }
-          } catch(e) { await reply('❌ Error: ' + e.message); }
-          continue;
-        }
-        if (textoCmds === '!ayuda' || textoCmds === '!help' || textoCmds === 'ayuda') {
-          await reply(
-            '🤖 *Agente de Marketing SOS Digital*\n\n' +
-            '📌 *Ejemplos de lo que puedes pedirme:*\n\n' +
-            '🎨 "hazme una imagen de Disney+ a $35"\n' +
-            '🎨 "crea un diseño para promo de Netflix"\n' +
-            '📤 "manda esta promo a los grupos"\n' +
-            '📸 "súbelo como estado/story"\n' +
-            '🔄 "mándalo a grupos y estado"\n' +
-            '⏰ "programa esto para las 6pm todos los días"\n' +
-            '⏰ "mándalo en 30 minutos"\n' +
-            '📊 "dame el reporte de sesiones"\n' +
-            '💾 "guarda esta plantilla como promo_netflix"\n\n' +
-            '📦 *Múltiples archivos:* Manda 2, 3 o más imágenes seguidas y los envío todos.\n\n' +
-            '🔄 Escribe *!reset* si el bot se confunde\n' +
-            '🔧 Escribe *!fix* para reparar errores de envío a grupos\n' +
-            '📋 Escribe *!estado* para ver programaciones activas\n' +
-            '🎨 Escribe *!modelo* para ver/cambiar modelo de imágenes\n\n' +
-            '_Modelos: dalle3 | gemini | stability | flux_'
-          );
-          continue;
-        }
-        if (textoCmds === '!estado' || textoCmds === '!schedules') {
-          const schedules = cargarSchedules();
-          if (!schedules.length) {
-            await reply('⏰ No hay programaciones activas.');
-          } else {
-            const lines = ['⏰ *Programaciones activas:*\n'];
-            schedules.forEach(s => {
-              lines.push(`• [${s.id}]\n  📌 ${s.descripcion}\n  🕐 ${s.recurrente ? 'Diario a las '+s.hora : 'Una vez en '+s.minutos+' min'}\n  📤 Destino: ${s.destino}`);
-            });
-            lines.push('\nPara cancelar di: _"cancela [ID]"_');
-            await reply(lines.join('\n'));
-          }
-          continue;
-        }
-
-        // FIX v2: nuevo comando !contactos para diagnóstico
-        if (textoCmds === '!contactos' || textoCmds === '!diagnostico') {
-          const lines = ['🔍 *Diagnóstico de contactos:*\n'];
-          for (const sid of SESIONES_ACTIVAS) {
-            const ss = sesiones[sid];
-            if (!ss) continue;
-            const waC = ss.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@s.whatsapp.net')).length : 0;
-            const lidC = ss.contactos ? Array.from(ss.contactos).filter(j => j.endsWith('@lid')).length : 0;
-            const otherC = ss.contactos ? ss.contactos.size - waC - lidC : 0;
-            lines.push(`${ss.listo?'🟢':'🔴'} *${sid}*: ${waC} wa + ${lidC} lid${otherC > 0 ? ' + '+otherC+' otros' : ''} = ${ss.contactos?.size || 0} total`);
-          }
-          const testJidList = buildStatusJidList(sesiones['personal'] || sesiones[SESIONES_ACTIVAS[0]], sesiones, SESIONES_ACTIVAS);
-          lines.push(`\n📊 *statusJidList combinado:* ${testJidList.length} contactos`);
-          await reply(lines.join('\n'));
-          continue;
-        }
-
-        if (textoCmds.startsWith('!modelo')) {
-          const partes = textoCmds.split(' ');
-          const nuevoModelo = partes[1]?.toLowerCase();
-          const modelosValidos = Object.keys(MODELOS_INFO);
-          if (!nuevoModelo || !modelosValidos.includes(nuevoModelo)) {
-            const lista = modelosValidos.map(m => {
-              const info = MODELOS_INFO[m];
-              const tieneKey = m === 'dalle3' ? !!OPENAI_KEY : m === 'gemini' ? !!GEMINI_KEY : m === 'stability' ? !!STABILITY_KEY : !!FAL_KEY;
-              const activo = m === modeloImagenActual ? ' ← *activo*' : '';
-              const keyStatus = tieneKey ? '✅' : '❌ (falta key)';
-              return `${info.emoji} *${m}* — ${info.nombre} ${keyStatus}${activo}`;
-            }).join('\n');
-            await reply(`🎨 *Modelos de imagen disponibles:*\n\n${lista}\n\n_Usa: !modelo dalle3 | !modelo gemini | !modelo stability | !modelo flux_`);
-          } else {
-            modeloImagenActual = nuevoModelo;
-            const info = MODELOS_INFO[nuevoModelo];
-            await reply(`${info.emoji} Modelo cambiado a *${info.nombre}*\nLas próximas imágenes se generarán con este modelo.`);
-          }
+        if (textoCmds === 'ayuda') {
+          await reply('🤖 Escribe *!ayuda* para ver todos los comandos y ejemplos.');
           continue;
         }
 
