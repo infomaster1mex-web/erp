@@ -689,12 +689,13 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
               ok++;
               sent = true;
               consecutiveFails = 0;
-              await new Promise(r => setTimeout(r, 1000 + Math.random()*1000));
+              await new Promise(r => setTimeout(r, 2500 + Math.random()*1500));
             } catch(e) {
               console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}) intento ${attempt}:`, e.message);
-              if (e.message?.includes('senderMessageKeys') && !sg._senderKeysFixed) {
+              const msg = String(e.message || '');
+              if ((msg.includes('senderMessageKeys') || msg.includes('Bad MAC')) && !sg._senderKeysFixed) {
                 sg._senderKeysFixed = true;
-                limpiarSenderKeys('grupos');
+                limpiarSenderKeys(grupoSesionId);
               }
               // Si es timeout, no esperar mucho para reintentar
               if (attempt < maxRetries) {
@@ -717,9 +718,14 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
   async function enviarEstado() {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
       if (!mediaBuffer) return '❌ Estado: necesito la imagen o video';
+      const grupoSesionId = process.env._GRUPO_OVERRIDE || 'grupos';
+      const excludeForStatus = new Set(['personal']);
+      // Cuando el destino es AMBOS, no usar la misma sesión de grupos también para status
+      // porque genera competencia de cifrado/sender-keys en la misma cuenta.
+      if (accion.tipo === 'ambos') excludeForStatus.add(grupoSesionId);
       // Excluir sesión personal del envío de promos/marketing
-      const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo && sesiones[id]?.sock && id !== 'personal');
-      if (!targets.length) return '❌ Estado: no hay sesiones activas (o sockets desconectados)';
+      const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo && sesiones[id]?.sock && !excludeForStatus.has(id));
+      if (!targets.length) return '❌ Estado: no hay sesiones activas disponibles para publicar estado';
       console.log(`[ESTADO] 🎯 Sesiones target: ${targets.join(', ')} (excluidas: ${SESIONES_ACTIVAS.filter(id => !targets.includes(id)).join(', ')})`);
       let ok = 0, fail = 0;
       for (const sid of targets) {
@@ -759,7 +765,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         } catch(e) {
           console.error(`[ESTADO] ❌ Error en "${sid}":`, e.message);
           // Auto-recovery: limpiar sender keys corruptos y reintentar
-          if (e.message?.includes('senderMessageKeys')) {
+          const errMsg = String(e.message || '');
+          if (errMsg.includes('senderMessageKeys') || errMsg.includes('Bad MAC')) {
             const cleaned = limpiarSenderKeys(sid);
             if (cleaned) {
               try {
@@ -792,9 +799,14 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
       return `✅ Estado: ${ok} sesiones OK, ${fail} fallidas`;
   }
 
-  // --- Ejecutar: paralelo si ambos, secuencial si uno solo ---
+  // --- Ejecutar: SIEMPRE secuencial ---
+  // Nota: correr grupos y estado en paralelo puede golpear la misma sesión a la vez
+  // (por ejemplo la cuenta "grupos"), provocando Bad MAC / sender-key corruption.
   if (accion.tipo === 'ambos') {
-    const [resGrupos, resEstado] = await Promise.all([enviarGrupos(), enviarEstado()]);
+    const resGrupos = await enviarGrupos();
+    // Pequeña pausa para que WhatsApp termine de asentarse antes del status
+    await new Promise(r => setTimeout(r, 2500));
+    const resEstado = await enviarEstado();
     resultados.push(resGrupos, resEstado);
   } else {
     for (const dest of destinos) {
