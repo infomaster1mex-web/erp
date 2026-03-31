@@ -640,24 +640,32 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
   const destinos = accion.tipo === 'ambos' ? ['grupos','estado'] : [accion.tipo];
   const resultados = [];
 
-  for (const dest of destinos) {
-    if (dest === 'grupos') {
+  // --- Función: enviar a grupos ---
+  async function enviarGrupos() {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
-      if (!mediaBuffer && !caption) { resultados.push('❌ Grupos: necesito al menos texto o imagen'); continue; }
+      if (!mediaBuffer && !caption) return '❌ Grupos: necesito al menos texto o imagen';
       const grupoSesionId = process.env._GRUPO_OVERRIDE || 'grupos';
       const sg = sesiones[grupoSesionId] || sesiones['grupos'] || sesiones[sesionId];
-      if (!sg?.listo) { resultados.push('❌ Grupos: sesión no conectada'); continue; }
+      if (!sg?.listo || !sg?.sock?.sendMessage) return '❌ Grupos: sesión no conectada o socket muerto';
       try {
         const groups = await sg.sock.groupFetchAllParticipating();
         const gids = Object.keys(groups);
-        if (!gids.length) { resultados.push('❌ Grupos: no hay grupos'); continue; }
+        if (!gids.length) return '❌ Grupos: no hay grupos';
         console.log(`[GRUPOS] 📋 ${gids.length} grupos encontrados:`, gids.map(g => `${groups[g]?.subject || g}`).join(', '));
         console.log(`[GRUPOS] 📦 Payload: mediaType=${mediaType}, bufferSize=${mediaBuffer?.length || 0}, caption=${caption?.length || 0} chars`);
         await replyFn(`📤 Enviando a ${gids.length} grupos...`);
         let ok = 0, fail = 0;
+        let consecutiveFails = 0;
 
         for (const gid of gids) {
-          const maxRetries = 2;
+          // Circuit breaker: si 3 grupos seguidos fallan, abortar
+          if (consecutiveFails >= 3) {
+            console.log(`[GRUPOS] 🛑 Circuit breaker: ${consecutiveFails} fallos consecutivos, abortando restantes`);
+            fail += gids.length - ok - fail;
+            break;
+          }
+
+          const maxRetries = 1; // Reducido de 2 a 1 para no tardar tanto en timeouts
           let sent = false;
           for (let attempt = 0; attempt <= maxRetries && !sent; attempt++) {
             try {
@@ -671,42 +679,58 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
                 payload = { text: caption };
               }
               if (attempt > 0) console.log(`[GRUPOS] 🔄 Retry #${attempt} para ${groups[gid]?.subject || gid}...`);
-              await sg.sock.sendMessage(gid, payload);
+
+              // Timeout de 15s para evitar bloqueos de minutos
+              await Promise.race([
+                sg.sock.sendMessage(gid, payload),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 15s')), 15000))
+              ]);
+
               ok++;
               sent = true;
-              await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
+              consecutiveFails = 0;
+              await new Promise(r => setTimeout(r, 1000 + Math.random()*1000));
             } catch(e) {
               console.error(`[GRUPOS] ❌ Error en ${gid} (${groups[gid]?.subject || 'sin nombre'}) intento ${attempt}:`, e.message);
               if (e.message?.includes('senderMessageKeys') && !sg._senderKeysFixed) {
                 sg._senderKeysFixed = true;
                 limpiarSenderKeys('grupos');
               }
+              // Si es timeout, no esperar mucho para reintentar
               if (attempt < maxRetries) {
-                const waitTime = (attempt + 1) * 5000;
+                const waitTime = e.message?.includes('Timeout') ? 2000 : (attempt + 1) * 3000;
                 console.log(`[GRUPOS] ⏳ Esperando ${waitTime/1000}s antes de reintentar...`);
                 await new Promise(r => setTimeout(r, waitTime));
               } else {
                 fail++;
+                consecutiveFails++;
               }
             }
           }
         }
         registrarPromoEnviada(caption, 'grupos', ok);
-        resultados.push(`✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}`);
-      } catch(e) { resultados.push('❌ Grupos: ' + e.message); }
-    }
+        return `✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}`;
+      } catch(e) { return '❌ Grupos: ' + e.message; }
+  }
 
-    if (dest === 'estado') {
+  // --- Función: publicar estado ---
+  async function enviarEstado() {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
-      if (!mediaBuffer) { resultados.push('❌ Estado: necesito la imagen o video'); continue; }
+      if (!mediaBuffer) return '❌ Estado: necesito la imagen o video';
       // Excluir sesión personal del envío de promos/marketing
-      const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo && id !== 'personal');
-      if (!targets.length) { resultados.push('❌ Estado: no hay sesiones activas'); continue; }
+      const targets = SESIONES_ACTIVAS.filter(id => sesiones[id]?.listo && sesiones[id]?.sock && id !== 'personal');
+      if (!targets.length) return '❌ Estado: no hay sesiones activas (o sockets desconectados)';
       console.log(`[ESTADO] 🎯 Sesiones target: ${targets.join(', ')} (excluidas: ${SESIONES_ACTIVAS.filter(id => !targets.includes(id)).join(', ')})`);
       let ok = 0, fail = 0;
       for (const sid of targets) {
         try {
           const ss = sesiones[sid];
+          // Null check robusto
+          if (!ss?.sock?.sendMessage) {
+            console.error(`[ESTADO] ❌ "${sid}" socket null o desconectado, saltando`);
+            fail++;
+            continue;
+          }
           // FIX v2: usar helper robusto para statusJidList
           const statusJidList = buildStatusJidList(ss, sesiones, SESIONES_ACTIVAS);
           if (!statusJidList.length) {
@@ -724,10 +748,14 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           }
 
           console.log(`[ESTADO] Publicando via sesión "${sid}" (${ss.numero}) con ${statusJidList.length} contactos`);
-          await ss.sock.sendMessage('status@broadcast', payload, { statusJidList });
+          // Timeout 20s para estado (es más pesado que grupos por la cantidad de contactos)
+          await Promise.race([
+            ss.sock.sendMessage('status@broadcast', payload, { statusJidList }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 20s')), 20000))
+          ]);
           console.log(`[ESTADO] ✅ Publicado en "${sid}"`);
           ok++;
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 800));
         } catch(e) {
           console.error(`[ESTADO] ❌ Error en "${sid}":`, e.message);
           // Auto-recovery: limpiar sender keys corruptos y reintentar
@@ -735,7 +763,20 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
             const cleaned = limpiarSenderKeys(sid);
             if (cleaned) {
               try {
-                await ss.sock.sendMessage('status@broadcast', payload, { statusJidList });
+                const ss = sesiones[sid];
+                if (!ss?.sock?.sendMessage) throw new Error('Socket desconectado');
+                const statusJidList = buildStatusJidList(ss, sesiones, SESIONES_ACTIVAS);
+                let retryPayload;
+                if (mediaType === 'video') {
+                  retryPayload = { video: mediaBuffer, mimetype: 'video/mp4', ...(caption ? { caption } : {}) };
+                } else {
+                  const isJpeg = mediaBuffer[0]===0xFF && mediaBuffer[1]===0xD8;
+                  retryPayload = { image: mediaBuffer, mimetype: isJpeg ? 'image/jpeg' : 'image/png', ...(caption ? { caption } : {}) };
+                }
+                await Promise.race([
+                  ss.sock.sendMessage('status@broadcast', retryPayload, { statusJidList }),
+                  new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 20s retry')), 20000))
+                ]);
                 console.log(`[ESTADO] ✅ Retry exitoso en "${sid}" después de limpiar sender keys`);
                 ok++;
                 continue;
@@ -748,7 +789,17 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         }
       }
       registrarPromoEnviada(caption, 'estado', ok);
-      resultados.push(`✅ Estado: ${ok} sesiones OK, ${fail} fallidas`);
+      return `✅ Estado: ${ok} sesiones OK, ${fail} fallidas`;
+  }
+
+  // --- Ejecutar: paralelo si ambos, secuencial si uno solo ---
+  if (accion.tipo === 'ambos') {
+    const [resGrupos, resEstado] = await Promise.all([enviarGrupos(), enviarEstado()]);
+    resultados.push(resGrupos, resEstado);
+  } else {
+    for (const dest of destinos) {
+      if (dest === 'grupos') resultados.push(await enviarGrupos());
+      if (dest === 'estado') resultados.push(await enviarEstado());
     }
   }
 
