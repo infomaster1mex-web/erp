@@ -2026,8 +2026,12 @@ app.get('/sos/status', (req, res) => {
 });
 
 app.get('/sos/ping', (req, res) => {
-  const s = sesiones.avisos;
-  res.json({ ok: s.listo, estado: s.listo ? 'conectado' : 'desconectado', numero: s.numero || null });
+  const sesionId = req.query.sesion || 'grupos';
+  const s = sesiones[sesionId];
+  if (!s) {
+    return res.json({ ok: false, estado: 'desconectado', error: `Sesión "${sesionId}" no existe en este hub` });
+  }
+  res.json({ ok: s.listo, estado: s.listo ? 'conectado' : 'desconectado', numero: s.numero || null, sesion: sesionId });
 });
 
 app.get('/sesion/:id/status', (req, res) => {
@@ -2082,12 +2086,43 @@ app.post('/sos/enviar', auth, async (req, res) => {
   if (!telefono || !mensaje) return res.json({ ok: false, error: 'Faltan campos: telefono, mensaje' });
   if (!s.listo) return res.json({ ok: false, error: `Bot ${sesionId} no conectado` });
 
+  const telLimpio = String(telefono).replace(/\D/g, '');
+
   try {
-    await s.sock.sendMessage(toJid(telefono), { text: mensaje });
-    console.log(`[${sesionId}] ✅ Enviado → ${telefono}`);
-    res.json({ ok: true, telefono, sesion: sesionId });
+    // PASO 1: Verificar que el número existe en WhatsApp y obtener JID real
+    let jidReal = toJid(telLimpio);
+    let jidInfo = null;
+    try {
+      const resultado = await s.sock.onWhatsApp(telLimpio);
+      const existe = resultado && resultado[0];
+      if (!existe || !existe.exists) {
+        console.log(`[${sesionId}] ⚠️ Número NO existe en WA: ${telLimpio}`);
+        return res.json({ ok: false, error: `El número ${telLimpio} no está registrado en WhatsApp` });
+      }
+      jidReal = existe.jid || jidReal;
+      jidInfo = existe.jid;
+      console.log(`[${sesionId}] 📞 Verificado: ${telLimpio} → ${jidReal}`);
+    } catch (verErr) {
+      // Si onWhatsApp falla, intentar con JID construido
+      console.log(`[${sesionId}] ⚠️ onWhatsApp falló (${verErr.message}), enviando con JID por defecto`);
+    }
+
+    // PASO 2: Enviar mensaje
+    const sentMsg = await s.sock.sendMessage(jidReal, { text: mensaje });
+    const msgId = sentMsg?.key?.id || null;
+
+    console.log(`[${sesionId}] 📤 Aceptado por bot → ${telLimpio} (jid=${jidReal}, msgId=${msgId})`);
+    res.json({
+      ok: true,
+      telefono: telLimpio,
+      sesion: sesionId,
+      jid: jidInfo,
+      messageId: msgId,
+      nota: 'Mensaje aceptado por el bot. No equivale a entrega confirmada.',
+    });
+
   } catch (err) {
-    console.error(`[${sesionId}] ❌ Error → ${telefono}:`, err.message);
+    console.error(`[${sesionId}] ❌ Error → ${telLimpio}:`, err.message);
     res.json({ ok: false, error: err.message });
   }
 });
@@ -2116,6 +2151,49 @@ app.post('/sos/enviar-masivo', auth, async (req, res) => {
   const exitosos = resultados.filter(r => r.ok).length;
   console.log(`[${sesionId}] Masivo: ${exitosos}/${mensajes.length}`);
   res.json({ ok: true, total: mensajes.length, exitosos, resultados });
+});
+
+// Diagnóstico de envío — prueba sin enviar mensaje real
+app.post('/sos/diagnostico', auth, async (req, res) => {
+  const { telefono, sesion } = req.body;
+  const sesionId = sesion || 'grupos';
+  const s = sesiones[sesionId];
+  const diag = { sesion: sesionId, telefono, pasos: [] };
+
+  if (!s) {
+    diag.pasos.push({ paso: 'sesion_existe', ok: false, error: 'No existe' });
+    return res.json({ ok: false, diagnostico: diag });
+  }
+  diag.pasos.push({ paso: 'sesion_existe', ok: true });
+
+  if (!s.listo) {
+    diag.pasos.push({ paso: 'sesion_conectada', ok: false, error: 'No conectada' });
+    return res.json({ ok: false, diagnostico: diag });
+  }
+  diag.pasos.push({ paso: 'sesion_conectada', ok: true, numero: s.numero });
+
+  if (telefono) {
+    try {
+      const tel = String(telefono).replace(/\D/g, '');
+      const resultado = await s.sock.onWhatsApp(tel);
+      const existe = resultado && resultado[0];
+      diag.pasos.push({
+        paso: 'numero_en_whatsapp',
+        ok: !!existe?.exists,
+        jid: existe?.jid || null,
+        input: tel,
+      });
+    } catch (err) {
+      diag.pasos.push({ paso: 'numero_en_whatsapp', ok: false, error: err.message });
+    }
+  }
+
+  diag.sesiones = {};
+  for (const [id, ss] of Object.entries(sesiones)) {
+    diag.sesiones[id] = { listo: ss.listo, numero: ss.numero, contactos: ss.contactos?.size || 0 };
+  }
+
+  res.json({ ok: true, diagnostico: diag });
 });
 
 // ═══════════════════════════════════════════════════════════════
