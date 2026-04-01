@@ -937,22 +937,55 @@ function jidANumero(jid) {
   return String(jid || '').split('@')[0].replace(/\D/g, '');
 }
 
+function obtenerClavesPropias(numeroSesion, sock) {
+  const keys = new Set();
+  const ids = [
+    numeroSesion,
+    sock?.user?.id,
+    sock?.user?.jid,
+    sock?.user?.lid,
+    sock?.user?.pn,
+  ].filter(Boolean);
+
+  for (const raw of ids) {
+    const s = String(raw);
+    keys.add(s);
+    const num = jidANumero(s);
+    if (num) {
+      keys.add(num);
+      keys.add(`${num}@s.whatsapp.net`);
+      keys.add(`${num}@lid`);
+    }
+  }
+  return keys;
+}
+
+function participanteCoincideConSesion(participant, ownKeys) {
+  const raw = String(participant?.id || participant?.jid || participant || '');
+  if (!raw) return false;
+  if (ownKeys.has(raw)) return true;
+  const num = jidANumero(raw);
+  return !!num && ownKeys.has(num);
+}
+
 async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
   const validateMeta = opts.validateMeta ?? (String(process.env.GROUP_VALIDATE_METADATA || 'true').toLowerCase() !== 'false');
   const skipCommunities = opts.skipCommunities ?? (String(process.env.GROUP_SKIP_COMMUNITIES || 'true').toLowerCase() !== 'false');
   const metaTimeoutMs = Number(opts.metaTimeoutMs || process.env.GROUP_META_VALIDATE_TIMEOUT_MS || 4000);
   const requireSelfInMetadata = opts.requireSelfInMetadata ?? (String(process.env.GROUP_REQUIRE_SELF_IN_METADATA || 'false').toLowerCase() === 'true');
+  const requireSelfInCache = opts.requireSelfInCache ?? (String(process.env.GROUP_REQUIRE_SELF_IN_CACHE || 'true').toLowerCase() !== 'false');
   const fallbackOnMetaTimeout = opts.fallbackOnMetaTimeout ?? (String(process.env.GROUP_META_FALLBACK_ON_TIMEOUT || 'true').toLowerCase() !== 'false');
 
   const raw = await sock.groupFetchAllParticipating();
   const entries = Object.entries(raw || {});
-  const propios = jidANumero(numeroSesion || sock?.user?.id);
+  const ownKeys = obtenerClavesPropias(numeroSesion || sock?.user?.id, sock);
   const preliminares = [];
   const omitidos = [];
 
   for (const [gid, g] of entries) {
     const subject = String(g?.subject || '').trim();
     const participants = Array.isArray(g?.participants) ? g.participants : [];
+    const hasSelfInCache = participants.some(p => participanteCoincideConSesion(p, ownKeys));
 
     if (!gid || !gid.endsWith('@g.us')) {
       omitidos.push({ id: gid, nombre: subject || gid, razon: 'jid no es grupo' });
@@ -970,6 +1003,10 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
       omitidos.push({ id: gid, nombre: subject, razon: 'sin participantes en cache' });
       continue;
     }
+    if (requireSelfInCache && !hasSelfInCache) {
+      omitidos.push({ id: gid, nombre: subject, razon: 'la sesión no aparece en participantes cache' });
+      continue;
+    }
 
     preliminares.push({
       id: gid,
@@ -977,6 +1014,7 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
       participantes: participants,
       descripcion: g?.desc || '',
       raw: g,
+      hasSelfInCache,
     });
   }
 
@@ -996,13 +1034,17 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
         new Promise((_, reject) => setTimeout(() => reject(new Error(`metadata timeout ${metaTimeoutMs}ms`)), metaTimeoutMs)),
       ]);
       const participants = Array.isArray(meta?.participants) ? meta.participants : g.participantes;
-      const sigoDentro = !requireSelfInMetadata || !propios || participants.some(p => jidANumero(p?.id || p?.jid || p) === propios);
+      const sigoDentro = participants.some(p => participanteCoincideConSesion(p, ownKeys));
       if (!meta?.subject) {
         omitidos.push({ id: g.id, nombre: g.nombre, razon: 'metadata sin subject' });
         continue;
       }
-      if (!sigoDentro) {
-        console.log(`[GRUPOS] ℹ️ ${g.nombre}: metadata no mostró el número propio; se conserva porque puede venir como @lid`);
+      if (requireSelfInMetadata && !sigoDentro) {
+        omitidos.push({ id: g.id, nombre: g.nombre, razon: 'la sesión no aparece en metadata' });
+        continue;
+      }
+      if (!sigoDentro && g.hasSelfInCache) {
+        console.log(`[GRUPOS] ℹ️ ${g.nombre}: metadata no mostró la sesión; se conserva por cache local válido`);
       }
       grupos.push({
         ...g.raw,
@@ -1015,8 +1057,8 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
     } catch (e) {
       const reason = String(e?.message || e);
       const isTimeout = /timeout/i.test(reason);
-      if (isTimeout && fallbackOnMetaTimeout) {
-        console.log(`[GRUPOS] ⚠️ ${g.nombre}: metadata timeout, usando cache local del grupo`);
+      if (isTimeout && fallbackOnMetaTimeout && g.hasSelfInCache) {
+        console.log(`[GRUPOS] ⚠️ ${g.nombre}: metadata timeout, usando cache local porque la sesión sí aparece en participantes`);
         grupos.push({
           ...g.raw,
           id: g.id,
@@ -1027,7 +1069,7 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
         });
         continue;
       }
-      omitidos.push({ id: g.id, nombre: g.nombre, razon: `metadata inválida: ${reason}` });
+      omitidos.push({ id: g.id, nombre: g.nombre, razon: isTimeout ? 'metadata timeout sin sesión en cache' : `metadata inválida: ${reason}` });
     }
   }
 
