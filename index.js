@@ -998,7 +998,7 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
   const skipCommunities = opts.skipCommunities ?? (String(process.env.GROUP_SKIP_COMMUNITIES || 'true').toLowerCase() !== 'false');
   const metaTimeoutMs = Number(opts.metaTimeoutMs || process.env.GROUP_META_VALIDATE_TIMEOUT_MS || 4000);
   const requireSelfInMetadata = opts.requireSelfInMetadata ?? (String(process.env.GROUP_REQUIRE_SELF_IN_METADATA || 'false').toLowerCase() === 'true');
-  const requireSelfInCache = opts.requireSelfInCache ?? (String(process.env.GROUP_REQUIRE_SELF_IN_CACHE || 'true').toLowerCase() !== 'false');
+  const requireSelfInCache = opts.requireSelfInCache ?? (String(process.env.GROUP_REQUIRE_SELF_IN_CACHE || 'false').toLowerCase() !== 'false');
   const fallbackOnMetaTimeout = opts.fallbackOnMetaTimeout ?? (String(process.env.GROUP_META_FALLBACK_ON_TIMEOUT || 'true').toLowerCase() !== 'false');
 
   const raw = await sock.groupFetchAllParticipating();
