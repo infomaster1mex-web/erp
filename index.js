@@ -645,13 +645,21 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
   const STATUS_SEND_TIMEOUT_MS = Number(process.env.STATUS_SEND_TIMEOUT_MS || 30000);
   const BOTH_FLOW_PAUSE_MS = Number(process.env.BOTH_FLOW_PAUSE_MS || 2500);
 
-  // --- Función: enviar a grupos ---
+// --- Función: enviar a grupos --- [PATCHED v2 - Bad MAC fix]
   async function enviarGrupos() {
       const mediaBuffer = mediaType === 'video' ? videoBuffer : imgBuffer;
       if (!mediaBuffer && !caption) return '❌ Grupos: necesito al menos texto o imagen';
       const sg = sesiones[grupoSesionId] || sesiones['grupos'] || sesiones[sesionId];
       if (!sg?.listo || !sg?.sock?.sendMessage) return '❌ Grupos: sesión no conectada o socket muerto';
       try {
+        // FIX: Limpieza PROACTIVA de sender keys antes de cada batch
+        sg._senderKeysFixed = false;
+        const preClean = limpiarSenderKeys(grupoSesionId);
+        if (preClean > 0) {
+          console.log(`[GRUPOS] 🧹 Pre-limpieza proactiva: ${preClean} sender-key files eliminados`);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+
         const { groups, omitidos, rawCount } = await obtenerGruposActivos(sg.sock, sg.numero);
         const gids = groups.map(g => g.id);
         if (!gids.length) {
@@ -666,15 +674,19 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         await replyFn(`📤 Enviando a ${gids.length} grupos válidos${rawCount !== gids.length ? ` (detectados ${rawCount}, omitidos ${rawCount - gids.length})` : ''}...`);
         let ok = 0, fail = 0;
         let consecutiveFails = 0;
+        let badMacDetected = false;
 
         for (const gid of gids) {
-          if (consecutiveFails >= 3) {
-            console.log(`[GRUPOS] 🛑 Circuit breaker: ${consecutiveFails} fallos consecutivos, abortando restantes`);
+          // FIX: Circuit breaker dinámico — más tolerante post-limpieza
+          const cbLimit = badMacDetected ? 5 : 3;
+          if (consecutiveFails >= cbLimit) {
+            console.log(`[GRUPOS] 🛑 Circuit breaker (${cbLimit}): ${consecutiveFails} fallos consecutivos, abortando restantes`);
             fail += gids.length - ok - fail;
             break;
           }
 
-          const maxRetries = 1;
+          // FIX: maxRetries 1 → 2 (3 intentos total)
+          const maxRetries = 2;
           let sent = false;
           for (let attempt = 0; attempt <= maxRetries && !sent; attempt++) {
             try {
@@ -702,13 +714,21 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
               const errMsg = String(e?.message || e || 'Error desconocido');
               console.error(`[GRUPOS] ❌ Error en ${gid} (${(groups.find(x => x.id === gid)?.subject) || 'sin nombre'}) intento ${attempt}:`, errMsg);
 
+              // FIX: Detección + limpieza agresiva de Bad MAC
               if ((errMsg.includes('senderMessageKeys') || errMsg.includes('Bad MAC')) && !sg._senderKeysFixed) {
                 sg._senderKeysFixed = true;
-                limpiarSenderKeys(grupoSesionId);
+                badMacDetected = true;
+                const cleaned = limpiarSenderKeys(grupoSesionId);
+                console.log(`[GRUPOS] 🧹 Bad MAC detectado — limpiados ${cleaned} sender-key files`);
+                consecutiveFails = 0; // FIX: Reset después de limpiar
+                console.log('[GRUPOS] ⏳ Esperando 8s para regenerar encryption state...');
+                await new Promise(r => setTimeout(r, 8000));
               }
 
               if (attempt < maxRetries) {
-                const waitTime = errMsg.includes('Timeout') ? 6000 : (attempt + 1) * 4000;
+                const waitTime = errMsg.includes('Timeout') ? 6000
+                  : (errMsg.includes('Bad MAC') || errMsg.includes('senderMessageKeys')) ? 5000 + attempt * 3000
+                  : (attempt + 1) * 4000;
                 console.log(`[GRUPOS] ⏳ Esperando ${waitTime/1000}s antes de reintentar...`);
                 await new Promise(r => setTimeout(r, waitTime));
               } else {
@@ -719,7 +739,12 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
           }
         }
         registrarPromoEnviada(caption, 'grupos', ok);
-        return `✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}${rawCount !== gids.length ? ` (filtrados ${rawCount - gids.length})` : ''}`;
+        const resultado = `✅ Grupos: ${ok} enviados, ${fail} fallidos de ${gids.length}${rawCount !== gids.length ? ` (filtrados ${rawCount - gids.length})` : ''}`;
+        // FIX: Si todos fallaron, dar sugerencia
+        if (ok === 0 && gids.length > 0) {
+          return resultado + '\n\n⚠️ *Todos fallaron.* Prueba:\n• *!fix* — limpiar sender keys\n• *!test* — probar otra sesión\n• *!reauth-grupos* — si persiste';
+        }
+        return resultado;
       } catch(e) { return '❌ Grupos: ' + (e?.message || e); }
   }
 
