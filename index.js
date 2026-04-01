@@ -655,7 +655,7 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
         const { groups, omitidos, rawCount } = await obtenerGruposActivos(sg.sock, sg.numero);
         const gids = groups.map(g => g.id);
         if (!gids.length) {
-          const detalle = omitidos.slice(0, 5).map(g => g.nombre || g.id).join(', ');
+          const detalle = omitidos.slice(0, 5).map(g => `${g.nombre || g.id}${g.razon ? ` [${g.razon}]` : ''}`).join(', ');
           return `❌ Grupos: no hay grupos válidos${detalle ? ` (omitidos: ${detalle})` : ''}`;
         }
         console.log(`[GRUPOS] 📋 ${gids.length} grupos válidos de ${rawCount}:`, groups.map(g => `${g.subject || g.id}`).join(', '));
@@ -941,6 +941,8 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
   const validateMeta = opts.validateMeta ?? (String(process.env.GROUP_VALIDATE_METADATA || 'true').toLowerCase() !== 'false');
   const skipCommunities = opts.skipCommunities ?? (String(process.env.GROUP_SKIP_COMMUNITIES || 'true').toLowerCase() !== 'false');
   const metaTimeoutMs = Number(opts.metaTimeoutMs || process.env.GROUP_META_VALIDATE_TIMEOUT_MS || 4000);
+  const requireSelfInMetadata = opts.requireSelfInMetadata ?? (String(process.env.GROUP_REQUIRE_SELF_IN_METADATA || 'false').toLowerCase() === 'true');
+  const fallbackOnMetaTimeout = opts.fallbackOnMetaTimeout ?? (String(process.env.GROUP_META_FALLBACK_ON_TIMEOUT || 'true').toLowerCase() !== 'false');
 
   const raw = await sock.groupFetchAllParticipating();
   const entries = Object.entries(raw || {});
@@ -994,10 +996,13 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
         new Promise((_, reject) => setTimeout(() => reject(new Error(`metadata timeout ${metaTimeoutMs}ms`)), metaTimeoutMs)),
       ]);
       const participants = Array.isArray(meta?.participants) ? meta.participants : g.participantes;
-      const sigoDentro = !propios || participants.some(p => jidANumero(p?.id || p?.jid || p) === propios);
-      if (!meta?.subject || !sigoDentro) {
-        omitidos.push({ id: g.id, nombre: g.nombre, razon: !meta?.subject ? 'metadata sin subject' : 'la sesión ya no figura dentro del grupo' });
+      const sigoDentro = !requireSelfInMetadata || !propios || participants.some(p => jidANumero(p?.id || p?.jid || p) === propios);
+      if (!meta?.subject) {
+        omitidos.push({ id: g.id, nombre: g.nombre, razon: 'metadata sin subject' });
         continue;
+      }
+      if (!sigoDentro) {
+        console.log(`[GRUPOS] ℹ️ ${g.nombre}: metadata no mostró el número propio; se conserva porque puede venir como @lid`);
       }
       grupos.push({
         ...g.raw,
@@ -1008,7 +1013,21 @@ async function obtenerGruposActivos(sock, numeroSesion, opts = {}) {
         desc: meta?.desc || g.descripcion || '',
       });
     } catch (e) {
-      omitidos.push({ id: g.id, nombre: g.nombre, razon: `metadata inválida: ${String(e?.message || e)}` });
+      const reason = String(e?.message || e);
+      const isTimeout = /timeout/i.test(reason);
+      if (isTimeout && fallbackOnMetaTimeout) {
+        console.log(`[GRUPOS] ⚠️ ${g.nombre}: metadata timeout, usando cache local del grupo`);
+        grupos.push({
+          ...g.raw,
+          id: g.id,
+          subject: g.nombre,
+          participants: g.participantes,
+          desc: g.descripcion || '',
+          _metaFallback: true,
+        });
+        continue;
+      }
+      omitidos.push({ id: g.id, nombre: g.nombre, razon: `metadata inválida: ${reason}` });
     }
   }
 
