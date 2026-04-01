@@ -652,13 +652,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
       const sg = sesiones[grupoSesionId] || sesiones['grupos'] || sesiones[sesionId];
       if (!sg?.listo || !sg?.sock?.sendMessage) return '❌ Grupos: sesión no conectada o socket muerto';
       try {
-        // FIX: Limpieza PROACTIVA de sender keys antes de cada batch
+        // Solo limpiar sender keys bajo demanda (en error Bad MAC), NO proactivamente
         sg._senderKeysFixed = false;
-        const preClean = limpiarSenderKeys(grupoSesionId);
-        if (preClean > 0) {
-          console.log(`[GRUPOS] 🧹 Pre-limpieza proactiva: ${preClean} sender-key files eliminados`);
-          await new Promise(r => setTimeout(r, 2000));
-        }
 
         const { groups, omitidos, rawCount } = await obtenerGruposActivos(sg.sock, sg.numero);
         const gids = groups.map(g => g.id);
@@ -1165,15 +1160,6 @@ async function conectarSesion(sesionId) {
       if (s._badMacCount >= 5) {
         console.log(`[${sesionId}] 🧹 Limpiando sender keys por Bad MAC repetido...`);
         limpiarSenderKeys(sesionId);
-        // También limpiar pre-keys y session files corruptos
-        try {
-          const files = fs.readdirSync(authDir);
-          const sessionFiles = files.filter(f => f.startsWith('session-') || f.startsWith('pre-key-'));
-          for (const f of sessionFiles) {
-            fs.unlinkSync(path.join(authDir, f));
-          }
-          if (sessionFiles.length) console.log(`[${sesionId}] 🧹 Eliminados ${sessionFiles.length} session/pre-key files`);
-        } catch(e) {}
         s._badMacCount = 0;
       }
     }
@@ -2307,7 +2293,7 @@ app.get('/sesion/:id/limpiar-crypto', auth, async (req, res) => {
 
     const files = fs.readdirSync(authDir);
     const cryptoFiles = files.filter(f =>
-      f.startsWith('sender-key-') || f.startsWith('session-') || f.startsWith('pre-key-')
+      f.startsWith('sender-key-')
     );
     for (const f of cryptoFiles) {
       fs.unlinkSync(path.join(authDir, f));
