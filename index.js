@@ -1152,6 +1152,37 @@ async function conectarSesion(sesionId) {
 
   s.sock.ev.on('creds.update', saveCreds);
 
+  // ── BAD MAC auto-fix: limpiar sender keys corruptos ──
+  if (!s._badMacCount) s._badMacCount = 0;
+  s.sock.ev.on('CB:call', () => {}); // keep-alive
+  const origEmit = s.sock.ev.emit.bind(s.sock.ev);
+  // Interceptar errores de descifrado a nivel de proceso
+  const badMacHandler = (err) => {
+    const msg = err?.message || err?.toString() || '';
+    if (msg.includes('Bad MAC') || msg.includes('Failed to decrypt')) {
+      s._badMacCount++;
+      console.log(`[${sesionId}] ⚠️ Bad MAC #${s._badMacCount}`);
+      if (s._badMacCount >= 5) {
+        console.log(`[${sesionId}] 🧹 Limpiando sender keys por Bad MAC repetido...`);
+        limpiarSenderKeys(sesionId);
+        // También limpiar pre-keys y session files corruptos
+        try {
+          const files = fs.readdirSync(authDir);
+          const sessionFiles = files.filter(f => f.startsWith('session-') || f.startsWith('pre-key-'));
+          for (const f of sessionFiles) {
+            fs.unlinkSync(path.join(authDir, f));
+          }
+          if (sessionFiles.length) console.log(`[${sesionId}] 🧹 Eliminados ${sessionFiles.length} session/pre-key files`);
+        } catch(e) {}
+        s._badMacCount = 0;
+      }
+    }
+  };
+  // Escuchar errores que Baileys loguea pero no expone
+  process.on('unhandledRejection', badMacHandler);
+  // Limpiar listener cuando se desconecta
+  s._badMacHandler = badMacHandler;
+
   s.sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -1190,6 +1221,11 @@ async function conectarSesion(sesionId) {
 
     if (connection === 'close') {
       s.listo = false;
+      // Limpiar listener de Bad MAC al desconectar
+      if (s._badMacHandler) {
+        process.removeListener('unhandledRejection', s._badMacHandler);
+        s._badMacHandler = null;
+      }
       const code = lastDisconnect?.error?.output?.statusCode;
       const reconectar = code !== DisconnectReason.loggedOut;
       console.log(`[${sesionId}] Desconectado. Código: ${code}`);
@@ -2181,6 +2217,7 @@ app.get('/', (req, res) => {
       <h2>${cfg.nombre}</h2>
       <div class="status">${statusBadge}</div>
       ${extra}
+      ${activa && s.listo ? `<a class="btn" href="/sesion/${id}/limpiar-crypto?api_key=${API_KEY}" title="Fix Bad MAC errors">🧹 Limpiar Crypto</a> ` : ''}
       ${activa ? `<a class="btn" href="/sesion/${id}/desconectar?api_key=${API_KEY}">🔄 Reconectar</a>` : ''}
     </div>`;
   }
@@ -2252,6 +2289,36 @@ app.get('/sesion/:id/reconectar-soft', auth, async (req, res) => {
     s.listo = false; s.qr = null; s.reconectando = false; s._retryCount = 0;
     console.log(`[${id}] 🔄 Reconexión suave solicitada manualmente`);
     setTimeout(() => conectarSesion(id), 2000);
+    res.redirect('/');
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Limpiar sender-keys y session files corruptos (fix Bad MAC)
+app.get('/sesion/:id/limpiar-crypto', auth, async (req, res) => {
+  const id = req.params.id;
+  const s = sesiones[id];
+  if (!s) return res.json({ ok: false, error: 'Sesión no existe' });
+
+  try {
+    const authDir = path.join(__dirname, 'auth_info', id);
+    if (!fs.existsSync(authDir)) return res.json({ ok: true, msg: 'No hay auth dir' });
+
+    const files = fs.readdirSync(authDir);
+    const cryptoFiles = files.filter(f =>
+      f.startsWith('sender-key-') || f.startsWith('session-') || f.startsWith('pre-key-')
+    );
+    for (const f of cryptoFiles) {
+      fs.unlinkSync(path.join(authDir, f));
+    }
+    console.log(`[${id}] 🧹 Limpiados ${cryptoFiles.length} archivos crypto (Bad MAC fix)`);
+
+    // Reconectar suave para regenerar keys
+    if (s.sock) { try { s.sock.end(); } catch(e) {} s.sock = null; }
+    s.listo = false; s.qr = null; s.reconectando = false;
+    s._badMacCount = 0;
+    setTimeout(() => conectarSesion(id), 3000);
     res.redirect('/');
   } catch(e) {
     res.json({ ok: false, error: e.message });
@@ -2601,7 +2668,8 @@ app.listen(PORT, () => {
     console.log(`[BOOT] Iniciando sesión: ${ids[i]}...`);
     await conectarSesion(ids[i]).catch(e => console.error(`[BOOT] Error ${ids[i]}:`, e.message));
     if (i < ids.length - 1) {
-      const stagger = 5000 + Math.random() * 3000;
+      // Más tiempo entre sesiones para evitar throttle de WA (especialmente para QR pairing)
+      const stagger = 12000 + Math.random() * 6000;
       console.log(`[BOOT] ⏳ Esperando ${Math.round(stagger/1000)}s antes de siguiente sesión...`);
       await new Promise(r => setTimeout(r, stagger));
     }
