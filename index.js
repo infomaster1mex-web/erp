@@ -673,7 +673,8 @@ async function ejecutarAccion(accion, imgBuffer, sesiones, SESIONES_ACTIVAS, ses
 
         for (const gid of gids) {
           // FIX: Circuit breaker dinámico — más tolerante post-limpieza
-          const cbLimit = badMacDetected ? 5 : 3;
+          const defaultCbLimit = badMacDetected ? 5 : 6;
+          const cbLimit = Number(process.env.GROUP_CB_LIMIT || defaultCbLimit);
           if (consecutiveFails >= cbLimit) {
             console.log(`[GRUPOS] 🛑 Circuit breaker (${cbLimit}): ${consecutiveFails} fallos consecutivos, abortando restantes`);
             fail += gids.length - ok - fail;
@@ -1184,6 +1185,7 @@ async function conectarSesion(sesionId) {
       s.reconectando = false;
       s._retryCount = 0;
       s._logoutCount = 0;
+      s._streamReplacedCount = 0;
       s.numero = s.sock.user?.id?.split(':')[0] || null;
       console.log(`[${sesionId}] ✅ Conectado: ${s.numero}`);
 
@@ -1246,12 +1248,28 @@ async function conectarSesion(sesionId) {
           s.reconectando = true;
           setTimeout(() => conectarSesion(sesionId), delay405);
         }
+      } else if (code === 440) {
+        // 440 = stream replaced / conexión duplicada o sesión tomada por otra conexión
+        if (!s._streamReplacedCount) s._streamReplacedCount = 0;
+        s._streamReplacedCount++;
+        const MAX_440_RETRIES = 5;
+        const delay440 = Math.min(15000 * s._streamReplacedCount, 120000);
+        console.log(`[${sesionId}] ⚠️ 440 Retry #${s._streamReplacedCount}/${MAX_440_RETRIES} — esperando ${Math.round(delay440/1000)}s`);
+        if (s._streamReplacedCount >= MAX_440_RETRIES) {
+          console.log(`[${sesionId}] ❌ Max reintentos 440 alcanzado. Sesión pausada — reauth manual recomendado.`);
+          s._streamReplacedCount = 0;
+          s.reconectando = false;
+        } else {
+          s.reconectando = true;
+          setTimeout(() => conectarSesion(sesionId), delay440);
+        }
       } else if (reconectar && !s.reconectando) {
         s._retryCount = 0;
         s.reconectando = true;
         // Delay escalonado para evitar reconexión simultánea de todas las sesiones
         const staggerDelay = 5000 + (Object.keys(sesiones).indexOf(sesionId) * 3000);
         setTimeout(() => conectarSesion(sesionId), staggerDelay);
+      } else if (!reconectar) {
       } else if (!reconectar) {
         // 401 = loggedOut — WA expulsó la sesión
         if (!s._logoutCount) s._logoutCount = 0;
@@ -1818,60 +1836,78 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
           if (textoCmds === '!test-grupos' || textoCmds === '!test') {
             // Probar con TODAS las sesiones para encontrar cuál puede enviar a grupos
             const sesionesAProbar = ['grupos', ...SESIONES_ACTIVAS.filter(id => id !== 'grupos' && id !== 'personal')];
+            const TEST_TIMEOUT_MS = Number(process.env.GROUP_TEST_TIMEOUT_MS || process.env.GROUP_SEND_TIMEOUT_MS || 45000);
             let algunoFunciono = false;
-            
+
             for (const testSid of sesionesAProbar) {
               const sg = sesiones[testSid];
-              if (!sg?.listo) continue;
-              
+              if (!sg?.listo || !sg?.sock?.sendMessage) continue;
+
               try {
-                const { groups, rawCount, omitidos } = await obtenerGruposActivos(sg.sock, sg.numero);
-                const gids = groups.map(g => g.id);
-                if (!gids.length) continue;
-                
-                const testGid = gids[0];
-                const testName = groups.find(g => g.id === testGid)?.subject || testGid;
-                if (rawCount !== gids.length) {
-                  await reply(`🧹 *${testSid}*: detectados ${rawCount}, válidos ${gids.length}, omitidos ${rawCount - gids.length}`);
+                const { groups, rawCount } = await obtenerGruposActivos(sg.sock, sg.numero);
+                if (!groups.length) continue;
+
+                const gruposPrueba = groups.slice(0, 3);
+                let exitoSesion = false;
+
+                if (rawCount !== groups.length) {
+                  await reply(`🧹 *${testSid}*: detectados ${rawCount}, válidos ${groups.length}, omitidos ${rawCount - groups.length}`);
                 }
-                await reply(`🧪 Probando con sesión *${testSid}* (${sg.numero}) → *${testName}*...`);
-                
-                try {
-                  await sg.sock.sendMessage(testGid, { text: '🧪 Test — SOS Digital Bot' });
-                  await reply(`✅ *${testSid}*: TEXTO OK en *${testName}*`);
-                  algunoFunciono = true;
-                  
-                  // Si hay imagen, probar también
-                  if (adminPending.imgBuffer) {
-                    await new Promise(r => setTimeout(r, 3000));
-                    try {
-                      const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
-                      await sg.sock.sendMessage(testGid, { 
-                        image: adminPending.imgBuffer, 
-                        mimetype: isJpeg ? 'image/jpeg' : 'image/png',
-                        caption: '🧪 Test imagen'
-                      });
-                      await reply(`✅ *${testSid}*: IMAGEN OK`);
-                    } catch(e2) {
-                      await reply(`❌ *${testSid}*: imagen falló: ${e2.message}`);
+
+                for (const testGroup of gruposPrueba) {
+                  const testGid = testGroup.id;
+                  const testName = testGroup.subject || testGid;
+                  await reply(`🧪 Probando con sesión *${testSid}* (${sg.numero}) → *${testName}*...`);
+
+                  try {
+                    await Promise.race([
+                      sg.sock.sendMessage(testGid, { text: '🧪 Test — SOS Digital Bot' }),
+                      new Promise((_, reject) => setTimeout(() => reject(new Error('Timed Out')), TEST_TIMEOUT_MS))
+                    ]);
+
+                    await reply(`✅ *${testSid}*: TEXTO OK en *${testName}*`);
+                    algunoFunciono = true;
+                    exitoSesion = true;
+
+                    if (adminPending.imgBuffer) {
+                      await new Promise(r => setTimeout(r, 3000));
+                      try {
+                        const isJpeg = adminPending.imgBuffer[0]===0xFF && adminPending.imgBuffer[1]===0xD8;
+                        await Promise.race([
+                          sg.sock.sendMessage(testGid, {
+                            image: adminPending.imgBuffer,
+                            mimetype: isJpeg ? 'image/jpeg' : 'image/png',
+                            caption: '🧪 Test imagen'
+                          }),
+                          new Promise((_, reject) => setTimeout(() => reject(new Error('Timed Out')), TEST_TIMEOUT_MS))
+                        ]);
+                        await reply(`✅ *${testSid}*: IMAGEN OK en *${testName}*`);
+                      } catch(e2) {
+                        await reply(`❌ *${testSid}*: imagen falló en *${testName}*: ${e2.message}`);
+                      }
                     }
+
+                    if (testSid !== 'grupos') {
+                      await reply(`💡 La sesión *${testSid}* SÍ puede enviar a grupos. Para usarla, manda:
+*!usar-sesion ${testSid}*`);
+                    }
+                    break;
+                  } catch(e1) {
+                    await reply(`❌ *${testSid}* en *${testName}*: ${e1.message}`);
                   }
-                  
-                  // Si encontramos una que funciona y no es 'grupos', sugerir cambio
-                  if (testSid !== 'grupos') {
-                    await reply(`💡 La sesión *${testSid}* SÍ puede enviar a grupos. Para usarla, manda:\n*!usar-sesion ${testSid}*`);
-                  }
-                  break; // Ya encontramos una que funciona
-                } catch(e1) {
-                  await reply(`❌ *${testSid}*: ${e1.message}`);
                 }
+
+                if (exitoSesion) break;
               } catch(e) {
-                continue; // Esta sesión no tiene grupos
+                continue;
               }
             }
-            
+
             if (!algunoFunciono) {
-              await reply('❌ Ninguna sesión pudo enviar a grupos. Opciones:\n1. Espera 10-15 min más (la sesión puede estar sincronizando)\n2. Manda un mensaje manual desde el teléfono a un grupo\n3. *!reauth-grupos* para re-vincular');
+              await reply(`❌ Ninguna sesión pudo enviar a grupos. Opciones:
+1. Espera 10-15 min más (la sesión puede estar sincronizando)
+2. Manda un mensaje manual desde el teléfono a un grupo
+3. *!reauth-grupos* para re-vincular`);
             }
             continue;
           }
@@ -1923,7 +1959,7 @@ ${memoriaStr}${recordatoriosStr}${contactosStr}${pendingImgStr}`;
               '📊 "dame el reporte de sesiones"\n\n' +
               '📦 *Múltiples archivos:* Manda 2+ imágenes seguidas.\n\n' +
               '🔧 *Comandos:*\n' +
-              '• *!test* — probar envío a 1 grupo\n' +
+              '• *!test* — probar envío hasta en 3 grupos\n' +
               '• *!fix* — reparar sender keys corruptas\n' +
               '• *!reauth-grupos* — re-escanear QR de grupos\n' +
               '• *!reset* — limpiar historial del bot\n' +
